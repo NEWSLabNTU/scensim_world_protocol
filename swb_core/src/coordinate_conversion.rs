@@ -3,8 +3,10 @@
 /// ROS:   X = Forward, Y = Left,  Z = Up, Radians
 /// CARLA: X = Forward, Y = Right, Z = Up, Degrees
 ///
-/// Conversion: Y-axis flip on positions, roll/yaw sign flip + degree/radian on rotations.
-/// Identical to autoware_carla_bridge's coordinate_conversion.rs.
+/// Conversion: Y-axis flip on positions; on rotations pitch and yaw change sign, roll does not,
+/// plus degree/radian (UE's convention: positive pitch is nose up, positive roll drops the
+/// right side; ROS's: positive pitch is nose down, positive roll drops the right side).
+/// Identical to autoware_carla_bridge's coordinate_conversion.rs (keep the two in step).
 use std::f64::consts::PI;
 
 use crate::proto::geometry_msgs::{Point, Pose, Quaternion};
@@ -53,15 +55,21 @@ impl MapOrigin {
 }
 
 /// Convert ROS euler angles (radians) to CARLA euler angles (degrees).
-/// Roll and yaw are sign-flipped; pitch is not.
+///
+/// Pitch and yaw are sign-flipped; roll is not. LibCarla's rotation is Rz(yaw) Ry(-pitch)
+/// Rx(-roll) on its left-handed numbers (carla/geom/Rotation.h, RotateVector); mirrored
+/// into ROS's frame (Y flipped) that is Rz(-yaw) Ry(-pitch) Rx(roll). So a car facing up a
+/// 10 deg slope is CARLA pitch +10 and ROS pitch -10, and both say roll +5 for its right
+/// side 5 deg down. Before 072 roll was flipped and pitch kept, which put every pitched
+/// pose into CARLA nose-down for nose-up and read CARLA's back the same way.
 pub fn ros_to_carla_rotation(roll: f64, pitch: f64, yaw: f64) -> (f64, f64, f64) {
-    (-roll * 180.0 / PI, pitch * 180.0 / PI, -yaw * 180.0 / PI)
+    (roll * 180.0 / PI, -pitch * 180.0 / PI, -yaw * 180.0 / PI)
 }
 
 /// Convert CARLA euler angles (degrees) to ROS euler angles (radians).
-/// Roll and yaw are sign-flipped; pitch is not.
+/// Pitch and yaw are sign-flipped; roll is not (see `ros_to_carla_rotation`).
 pub fn carla_to_ros_rotation(roll: f64, pitch: f64, yaw: f64) -> (f64, f64, f64) {
-    (-roll * PI / 180.0, pitch * PI / 180.0, -yaw * PI / 180.0)
+    (roll * PI / 180.0, -pitch * PI / 180.0, -yaw * PI / 180.0)
 }
 
 /// Convert quaternion to euler angles (roll, pitch, yaw) in radians. ZYX convention.
@@ -243,6 +251,73 @@ mod tests {
         assert!((rx - 10.0).abs() < 1e-10);
         assert!((ry - 5.0).abs() < 1e-10);
         assert!((rz - 0.0).abs() < 1e-10);
+    }
+
+    /// LibCarla 0.9.16's rotation matrix (carla/geom/Rotation.h, RotateVector), degrees.
+    fn libcarla_matrix(r: f64, p: f64, y: f64) -> [[f64; 3]; 3] {
+        let (cr, sr) = (r.to_radians().cos(), r.to_radians().sin());
+        let (cp, sp) = (p.to_radians().cos(), p.to_radians().sin());
+        let (cy, sy) = (y.to_radians().cos(), y.to_radians().sin());
+        [
+            [cp * cy, cy * sp * sr - sy * cr, -cy * sp * cr - sy * sr],
+            [cp * sy, sy * sp * sr + cy * cr, -sy * sp * cr + cy * sr],
+            [sp, -cp * sr, cp * cr],
+        ]
+    }
+
+    /// ROS's ZYX rotation matrix, radians.
+    fn ros_matrix(r: f64, p: f64, y: f64) -> [[f64; 3]; 3] {
+        let (cr, sr) = (r.cos(), r.sin());
+        let (cp, sp) = (p.cos(), p.sin());
+        let (cy, sy) = (y.cos(), y.sin());
+        [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ]
+    }
+
+    #[test]
+    fn carla_pitch_up_is_ros_pitch_down_sign() {
+        // CARLA pitch +10: the nose up (LibCarla's forward vector has z = sin 10 > 0).
+        let f = libcarla_matrix(0.0, 10.0, 0.0);
+        assert!(f[2][0] > 0.17);
+        // The same attitude in ROS is pitch -10 (ROS's forward z = -sin(pitch)).
+        let (r, p, y) = carla_to_ros_rotation(0.0, 10.0, 0.0);
+        assert!(r.abs() < 1e-12 && y.abs() < 1e-12);
+        assert!((p - (-10.0_f64).to_radians()).abs() < 1e-12);
+        assert!(ros_matrix(r, p, y)[2][0] > 0.17);
+        let (_, cp, _) = ros_to_carla_rotation(0.0, (-10.0_f64).to_radians(), 0.0);
+        assert!((cp - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn carla_roll_and_ros_roll_drop_the_same_side() {
+        // CARLA roll +5: the right side down (right vector, CARLA +Y, gets z < 0).
+        assert!(libcarla_matrix(5.0, 0.0, 0.0)[2][1] < 0.0);
+        // ROS roll +5: the left side (+Y) up, i.e. the right side down.
+        let (r, _, _) = carla_to_ros_rotation(5.0, 0.0, 0.0);
+        assert!((r - 5.0_f64.to_radians()).abs() < 1e-12);
+        assert!(ros_matrix(r, 0.0, 0.0)[2][1] > 0.0);
+    }
+
+    #[test]
+    fn the_conversion_is_libcarlas_rotation_mirrored() {
+        // M R_carla M == R_ros, with M = diag(1, -1, 1), for a general attitude.
+        for &(cr, cp, cy) in &[(7.0, -12.0, 143.0), (-3.0, 9.7, -91.0), (20.0, 30.0, 10.0)] {
+            let c = libcarla_matrix(cr, cp, cy);
+            let (r, p, y) = carla_to_ros_rotation(cr, cp, cy);
+            let ros = ros_matrix(r, p, y);
+            let m = [1.0, -1.0, 1.0];
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!(
+                        (m[i] * c[i][j] * m[j] - ros[i][j]).abs() < 1e-12,
+                        "({cr}, {cp}, {cy}) [{i}][{j}]"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
