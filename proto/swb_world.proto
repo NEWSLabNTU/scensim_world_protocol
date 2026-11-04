@@ -10,6 +10,16 @@
 // with another convention (CARLA: left-handed) converts inside its server. Poses are at the
 // SSv2 entity origin; the declared box sits around it.
 //
+// Orientation: `Pose.orientation` is a unit quaternion (x, y, z, w) of the body in that frame,
+// ROS REP-103 (ENU, x forward, y left, z up, right-handed): roll about x, pitch about y, yaw
+// about z, so positive pitch puts the nose DOWN and positive roll the right side down;
+// `Pose.rpy` is the same rotation as ZYX Euler angles. Both directions, every message: what
+// the bridge sends (spawn, Apply) and what the server reports (Step states, read-backs). A
+// server whose simulator keeps another convention converts at its own edge and nowhere
+// else (CARLA/UE: pitch positive nose up, so roll is kept and pitch and yaw negate;
+// swb_carla_world). Isaac's USD stage is ENU already. `swb_world_check conformance` poses a
+// body at roll +5, pitch -10 (nose up), yaw 30 deg and requires it back within 1 deg.
+//
 // Lockstep, two requests per SSv2 frame, as SSv2 sends them: `Apply` (SSv2's
 // `UpdateEntityStatus`) hands the server every entity's drive for the coming step and gets
 // back what the server moves itself; `Step` (SSv2's `UpdateFrame`) advances the world and

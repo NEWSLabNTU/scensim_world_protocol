@@ -231,7 +231,7 @@ if __name__ == "__main__":
 
 ```bash
 python3 fake_world.py &
-swb_world_check conformance tcp://127.0.0.1:5599     # 19 passed, 0 failed
+swb_world_check conformance tcp://127.0.0.1:5599     # 20 passed, 0 failed
 ```
 
 The shell's own tests (`swb_world_server/test/test_server.py`) drive a similar fake world
@@ -262,7 +262,7 @@ It also holds the `Apply`'s drives for its `step` itself.
 ## The conformance check
 
 ```bash
-swb_world_check conformance <endpoint> [--map <lanelet2_map.osm or map dir>]
+swb_world_check conformance <endpoint> [--map <lanelet2_map.osm or map dir>] [--slope X,Y,Z,YAW_DEG,PITCH_DEG]
 swb_world_check hello <endpoint> [--wait SECONDS] [--quiet]
 swb_world_check rtt <endpoint> [--n 2000] [--gap-us 0]
 ```
@@ -301,6 +301,8 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 | five frames of Apply and Step | five times: `Apply` (the NPC posed 1 m further in x each frame, the ego listed with nothing set) and `Step` (`want_states`) both answer. Each step is 0.05 s, split into `ceil(0.05 / max_physics_dt)` substeps when `max_physics_dt > 0` |
 | time advances every step | each `StepReply.sim_time_ns` is greater than the one before, starting from the load's |
 | a kinematic body goes where it is posed | the NPC's `x` in the step replies' `states` moved 4 m (within 0.5) from the first frame to the fifth |
+| a pose's orientation reads back as posed | the NPC posed at (30, 0, 1.5) with roll +5, pitch -10 (nose up), yaw 30 deg (ROS REP-103) reads back within 1 deg in the next step's `states`. It catches a server whose two directions disagree; one that mirrors both alike passes it |
+| the ego settles with the road's pitch sign | with `--slope X,Y,Z,YAW,PITCH`: the ego was spawned level at (X, Y, Z) with heading YAW (world frame, m, deg) on a known slope of the `--map`, whose pitch along that heading is PITCH (deg, ROS's sense: facing uphill is negative). After 60 steps (3 s) of the simulator's own gravity, its read-back pitch has PITCH's sign and is within 3 deg of it. This is the absolute check: only the world's geometry decides it. Skipped without `--slope`. CARLA, NTU ramp (072 leg 40): `--map <NTU> --slope 52969.53,67864.92,9.6,-91.1,-10.5` (map coordinates: the check's map origin is 0) |
 | despawning an unknown handle is refused | `Despawn` of handle 999999 is refused |
 | a tracked body follows at 5 m/s | with `TRACKS_TARGETS` or `TRACKED_MOTION`: a `TRACKED` vehicle at (60, 0, 0.5) is driven for 20 frames at 5 m/s (by pose and `ssv2_twist`, or by `twist`) and moves more than 2.5 m; under `TRACKS_TARGETS` the 20th `ApplyReply` has a `TrackingSample` for it. Skipped otherwise |
 | signal colours are taken / signals are refused without SIGNALS | with `SIGNALS`, an empty `SetSignals` succeeds; without, it is refused |
@@ -312,7 +314,7 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 | release | `Release` succeeds |
 | no owner after release | a probe `Hello` answers no owner |
 
-A core-only server runs 19 checks. Not checked here: `AGENT_VEHICLES`, `READS_BACK`,
+A core-only server runs 20 checks (21 with `--slope`). Not checked here: `AGENT_VEHICLES`, `READS_BACK`,
 `CONTACTS`, `AUTOPILOT`, and `Body.wheels` and `spec_hash` (the bridge checks those against
 the catalog at a real ego's spawn).
 

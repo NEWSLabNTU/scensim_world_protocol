@@ -3,6 +3,7 @@
 //!
 //!     swb_world_check hello <endpoint> [--wait SECONDS] [--quiet]
 //!     swb_world_check conformance <endpoint> [--map <lanelet2_map.osm or map dir>]
+//!         [--slope X,Y,Z,YAW_DEG,PITCH_DEG]
 //!     swb_world_check rtt <endpoint> [--n 2000] [--gap-us 0]
 //!
 //! `hello`: one probe `Hello` (changes nothing on the server: no ownership, no lease). Exit 0
@@ -19,6 +20,14 @@
 //! `SIGNALS` and a map whose directory has `traffic_lights.yaml`, one lamp of it is set red,
 //! then green, and read back from the world each time (`GetSignals`).
 //!
+//! Orientation (swb_world.proto, "Orientation": ROS REP-103, positive pitch nose down): a
+//! kinematic body posed at roll +5, pitch -10, yaw 30 deg must read back within 1 deg. That
+//! catches a server whose two directions disagree, not one that mirrors both alike. For the
+//! absolute sign, `--slope` puts the ego, level, on a known slope of the map (world frame, m;
+//! its heading and the road's pitch along it, deg, ROS's sense: facing uphill is negative)
+//! and lets it settle under the simulator's own gravity for 3 s: its read-back pitch must
+//! have the road's sign and be within 3 deg of it. Only the world's geometry decides that.
+//!
 //! `rtt`: the round trip of a probe `Hello`, N times: the protocol's own cost per request on
 //! this host (p50, p95, max), changing nothing on the server. `--gap-us`: a pause before
 //! each, as a frame's idle time between requests (a sleeping server wakes slower).
@@ -27,6 +36,7 @@ use std::collections::BTreeSet;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+use swb_core::coordinate_conversion;
 use swb_core::proto::swb_world as wire;
 use swb_core::world_client::{self, CallError, Client, PROTOCOL_VERSION};
 use wire::request::Request as Q;
@@ -38,7 +48,8 @@ const STEP: f64 = 0.05;
 fn usage() -> ExitCode {
     eprintln!(
         "usage: swb_world_check hello <endpoint> [--wait SECONDS] [--quiet]\n       \
-         swb_world_check conformance <endpoint> [--map <lanelet2 map>]\n       \
+         swb_world_check conformance <endpoint> [--map <lanelet2 map>] \
+         [--slope X,Y,Z,YAW_DEG,PITCH_DEG]\n       \
          swb_world_check rtt <endpoint> [--n N] [--gap-us US]"
     );
     ExitCode::from(2)
@@ -61,7 +72,18 @@ fn main() -> ExitCode {
             opt("--wait").and_then(|w| w.parse().ok()).unwrap_or(0.0),
             args.iter().any(|a| a == "--quiet"),
         ),
-        "conformance" => conformance(endpoint, opt("--map")),
+        "conformance" => {
+            let slope = match opt("--slope").map(|v| {
+                v.split(',')
+                    .map(|x| x.trim().parse::<f64>())
+                    .collect::<Result<Vec<_>, _>>()
+            }) {
+                None => None,
+                Some(Ok(v)) if v.len() == 5 => Some([v[0], v[1], v[2], v[3], v[4]]),
+                Some(_) => return usage(),
+            };
+            conformance(endpoint, opt("--map"), slope)
+        }
         "rtt" => rtt(
             endpoint,
             opt("--n").and_then(|n| n.parse().ok()).unwrap_or(2000),
@@ -347,7 +369,7 @@ fn state_x(s: &wire::StepReply, handle: u32) -> Option<f64> {
         .map(|p| p.x)
 }
 
-fn conformance(endpoint: &str, map: Option<String>) -> ExitCode {
+fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> ExitCode {
     let mut r = Report {
         passed: 0,
         failed: 0,
@@ -549,12 +571,28 @@ fn conformance(endpoint: &str, map: Option<String>) -> ExitCode {
     // Where to put bodies: the map origin's surroundings are not drivable everywhere, so
     // only relative motion is checked.
     let (x0, y0, z0) = (0.0, 0.0, 0.5);
+    // With --slope the ego goes, level, onto the given slope (the absolute sign check below).
+    let ego_at = match slope {
+        Some([x, y, z, yaw_deg, _]) => {
+            let (qx, qy, qz, qw) =
+                coordinate_conversion::euler_to_quaternion(0.0, 0.0, yaw_deg.to_radians());
+            let mut p = pose(x, y, z);
+            p.orientation = Some(wire::Quat {
+                x: qx,
+                y: qy,
+                z: qz,
+                w: qw,
+            });
+            p
+        }
+        None => pose(x0, y0, z0),
+    };
     let ego = match spawn(
         &mut c,
         "conformance_ego",
         wire::Kind::Ego,
         wire::Motion::External,
-        pose(x0, y0, z0),
+        ego_at,
     ) {
         Ok(s) => {
             r.check(
@@ -656,6 +694,117 @@ fn conformance(endpoint: &str, map: Option<String>) -> ExitCode {
                 other => Err(format!("its x went {other:?}")),
             },
         );
+        // The orientation convention (ROS REP-103, ENU): pose the body nose up and tilted,
+        // read it back. A server that converts frames at its edge must give the same
+        // quaternion back; a sign slip in pitch or roll shows here as a 20 or 10 deg miss.
+        let (roll, pitch, yaw) = (5f64.to_radians(), (-10f64).to_radians(), 30f64.to_radians());
+        let (qx, qy, qz, qw) = coordinate_conversion::euler_to_quaternion(roll, pitch, yaw);
+        let mut tilted = pose(x0 + 30.0, y0, z0 + 1.0);
+        tilted.orientation = Some(wire::Quat {
+            x: qx,
+            y: qy,
+            z: qz,
+            w: qw,
+        });
+        let mut poses = vec![wire::EntityPose {
+            handle: h,
+            pose: Some(tilted),
+            ..Default::default()
+        }];
+        if let Some(e) = ego {
+            poses.push(wire::EntityPose {
+                handle: e,
+                ..Default::default()
+            });
+        }
+        r.check(
+            "a pose's orientation reads back as posed (roll +5, pitch -10 = nose up, yaw 30 deg)",
+            match frame(&mut c, poses, steps) {
+                Err(e) => Err(e),
+                Ok((_, s)) => match s
+                    .states
+                    .iter()
+                    .find(|e| e.handle == h)
+                    .and_then(|e| e.pose.as_ref())
+                    .and_then(|p| p.orientation.as_ref())
+                {
+                    None => Err("no orientation for it in the step reply".into()),
+                    Some(q) => {
+                        let dot = (q.x * qx + q.y * qy + q.z * qz + q.w * qw).abs().min(1.0);
+                        let miss = (2.0 * dot.acos()).to_degrees();
+                        let (r2, p2, y2) =
+                            coordinate_conversion::quaternion_to_euler(q.x, q.y, q.z, q.w);
+                        let got = format!(
+                            "read back roll {:.1}, pitch {:.1}, yaw {:.1} deg",
+                            r2.to_degrees(),
+                            p2.to_degrees(),
+                            y2.to_degrees()
+                        );
+                        if miss < 1.0 {
+                            Ok(format!("{got} ({miss:.2} deg off)"))
+                        } else {
+                            Err(format!("{got}: {miss:.1} deg off"))
+                        }
+                    }
+                },
+            },
+        );
+        match (slope, ego) {
+            (None, _) => r.skip(
+                "the ego settles with the road's pitch sign",
+                "no --slope (a known slope of the map)",
+            ),
+            (Some(_), None) => r.skip("the ego settles with the road's pitch sign", "no ego"),
+            (Some([.., road_deg]), Some(e)) => {
+                let mut last = None;
+                let mut failure = None;
+                for _ in 0..60 {
+                    let poses = vec![wire::EntityPose {
+                        handle: e,
+                        ..Default::default()
+                    }];
+                    match frame(&mut c, poses, steps) {
+                        Ok((_, s)) => {
+                            last = s
+                                .states
+                                .iter()
+                                .find(|st| st.handle == e)
+                                .and_then(|st| st.pose.as_ref())
+                                .and_then(|p| p.orientation.as_ref())
+                                .map(|q| {
+                                    coordinate_conversion::quaternion_to_euler(q.x, q.y, q.z, q.w)
+                                        .1
+                                        .to_degrees()
+                                })
+                        }
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                r.check(
+                    "the ego settles with the road's pitch sign (--slope)",
+                    match (failure, last) {
+                        (Some(e), _) => Err(e),
+                        (None, None) => {
+                            Err("no orientation for the ego in the step replies".into())
+                        }
+                        (None, Some(p))
+                            if p.signum() == road_deg.signum() && (p - road_deg).abs() < 3.0 =>
+                        {
+                            Ok(format!(
+                                "pitch {p:.1} deg after 3 s, the road {road_deg:.1}"
+                            ))
+                        }
+                        (None, Some(p)) => Err(format!(
+                            "pitch {p:.1} deg after 3 s, the road {road_deg:.1}: the server's \
+                             pitch is not ROS's (positive nose down)"
+                        )),
+                    },
+                );
+            }
+        }
     }
     r.check(
         "despawning an unknown handle is refused",

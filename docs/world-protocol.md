@@ -39,6 +39,14 @@ only uses when the server declares it needs no bump.
 - Poses (`Pose`: `position`, `orientation` as a quaternion x, y, z, w) are at the **SSv2
   entity origin**. For a vehicle that is the rear axle centre on the ground. The declared box
   sits around that origin (`Spawn.box_center` is the box centre from it).
+- Orientation is ROS REP-103 (ENU: x forward, y left, z up, right-handed), in both
+  directions and in every message: roll about x, pitch about y, yaw about z, so a positive
+  pitch puts the nose **down** and a positive roll the right side down; a car facing up a
+  10 deg slope has pitch -10 deg. A server whose simulator keeps another convention
+  converts at its own edge (CARLA/UE: pitch positive nose up, so roll stays, pitch and yaw
+  negate; `swb_carla_world`); Isaac's stage is ENU and takes the quaternion as it is. The
+  conformance check tests it ("a pose's orientation reads back as posed" and, on a map
+  slope, "the ego settles with the road's pitch sign").
 - `Pose.rpy`, when set, is roll, pitch and yaw in radians, authoritative over the quaternion.
   A server that holds orientation as Euler angles sets it so a reader does not round-trip
   through the quaternion.

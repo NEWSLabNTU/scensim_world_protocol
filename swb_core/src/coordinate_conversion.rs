@@ -1,5 +1,12 @@
 /// Coordinate conversion between ROS (right-handed) and CARLA (left-handed) frames.
 ///
+/// CARLA-only: the `ros_to_carla_*` / `carla_to_ros_*` functions, `ros_pose_to_carla`,
+/// `carla_to_ros_pose` and `MapOrigin::{map_to_carla, carla_to_map}` serve swb_carla_world
+/// (the one world server with a CARLA client) and nothing else; the bridge uses only the
+/// generic quaternion/Euler helpers and the origin offsets. The protocol itself is ROS
+/// REP-103 throughout (swb_world.proto, "Orientation"); another simulator converts in its
+/// own server, not here.
+///
 /// ROS:   X = Forward, Y = Left,  Z = Up, Radians
 /// CARLA: X = Forward, Y = Right, Z = Up, Degrees
 ///
