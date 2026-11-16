@@ -17,7 +17,7 @@ import uuid
 
 from . import lifetime
 from . import protocol as pb
-from .watchdog import STEP_DEADLINE, StepWatchdog
+from .watchdog import LOAD_DEADLINE, STEP_DEADLINE, StepWatchdog
 from .world import Drive, World  # noqa: F401 - re-exported for World implementations
 
 log = logging.getLogger("swb_world_server")
@@ -81,8 +81,9 @@ class WorldServer:
     def __init__(self, world, lease_seconds=LEASE_SECONDS, clock=time.monotonic,
                  is_gone=lifetime.is_gone, watchdog=None):
         self.world = world
-        # Every step under a deadline (G70); `run` gives it one, a test may give its own.
+        # Every request under a deadline (G70); `run` gives it one, a test may give its own.
         self.watchdog = watchdog or StepWatchdog(None)
+        self.load_deadline = LOAD_DEADLINE
         self.capabilities = {pb.CAPABILITY[c] for c in world.capabilities}
         self.lease_seconds = lease_seconds
         self.clock = clock
@@ -114,17 +115,31 @@ class WorldServer:
         try:
             if which is None:
                 raise RequestError("empty request")
-            if which == "hello":
-                reply = self._hello(request.hello, request.client)
-            else:
-                self._check_owner(which, request.client)
-                reply = getattr(self, f"_{which}")(getattr(request, which))
+            # armed before anything of the request runs: a Hello may reset the last owner's
+            # entities, an Apply or a Spawn may enter the world (G70)
+            with self.watchdog.step(self._label(which, request),
+                                    self.load_deadline if which == "load_world" else None):
+                if which == "hello":
+                    reply = self._hello(request.hello, request.client)
+                else:
+                    self._check_owner(which, request.client)
+                    reply = getattr(self, f"_{which}")(getattr(request, which))
         except RequestError as e:
             reply = pb.Reply(ok=False, error=str(e))
         except Exception as e:  # noqa: BLE001 - the world failed; the bridge fails the frame
             log.exception("%s failed", which)
             reply = pb.Reply(ok=False, error=f"{which} failed in the world server: {e}")
         return reply.SerializeToString()
+
+    def _label(self, which, request):
+        """What the watchdog names when a request outlives its deadline."""
+        if which == "step":
+            r = request.step
+            return (f"step {self.frame + 1} ({r.substeps} x {r.dt:g} s at sim time "
+                    f"{self.sim_time:.3f} s)")
+        if which == "load_world":
+            return f"load_world {request.load_world.world}"
+        return f"{which} request (frame {self.frame})"
 
     # --- Ownership -------------------------------------------------------------------------
 
@@ -288,10 +303,8 @@ class WorldServer:
             raise RequestError("Step carries no poses since protocol 4: send them by Apply")
         drives, self.pending = self.pending, {}
         started = time.perf_counter()
-        with self.watchdog.step(f"step {self.frame + 1} ({req.substeps} x {req.dt:g} s at sim "
-                                f"time {self.sim_time:.3f} s)"):
-            states, contacts = self.world.step(drives, req.substeps, req.dt, req.render,
-                                               self.sim_time)
+        states, contacts = self.world.step(drives, req.substeps, req.dt, req.render,
+                                           self.sim_time)
         elapsed = time.perf_counter() - started
         self.step_ms.append(1e3 * elapsed)
         self.sim_time += req.substeps * req.dt
@@ -390,10 +403,16 @@ class WorldServer:
 
 
 def serve(socket, server, should_stop=lambda: False, poll_ms=100):
-    """Answer requests on a bound REP `socket` until `Shutdown` or `should_stop()`."""
+    """Answer requests on a bound REP `socket` until `Shutdown` or `should_stop()`. The pass
+    between requests is under the deadline too: `should_stop` may call into the simulator
+    (Isaac's `app.is_running()`)."""
     import zmq
 
-    while not server.stopped and not should_stop():
+    def stopping():
+        with server.watchdog.step(f"the loop between requests (after frame {server.frame})"):
+            return should_stop()
+
+    while not server.stopped and not stopping():
         if not socket.poll(poll_ms, zmq.POLLIN):
             continue
         socket.send(server.handle(socket.recv()))
@@ -418,11 +437,15 @@ def bind(port, host="127.0.0.1"):
     return socket
 
 
-def run(world, socket, should_stop=lambda: False, step_deadline=STEP_DEADLINE):
+def run(world, socket, should_stop=lambda: False, step_deadline=STEP_DEADLINE,
+        load_deadline=LOAD_DEADLINE):
     """Serve `world` on the bound `socket` until `Shutdown`, SIGINT/SIGTERM or
-    `should_stop()`. A step that runs past `step_deadline` seconds ends the process with exit
-    75 (`watchdog`, roadmap 077 G70); `None` or 0: no deadline."""
+    `should_stop()`. A request (or the loop between them) that runs past its deadline,
+    `load_deadline` for a LoadWorld and `step_deadline` for the rest, ends the process: a
+    watchdog child process dumps its stacks and kills it, for its supervisor to start a fresh
+    one (`watchdog`, roadmap 077 G70). `None` or 0: no deadline."""
     server = WorldServer(world, watchdog=StepWatchdog(step_deadline))
+    server.load_deadline = load_deadline
     stop = {"now": False}
 
     def on_signal(signum, _frame):
@@ -433,11 +456,11 @@ def run(world, socket, should_stop=lambda: False, step_deadline=STEP_DEADLINE):
     signal.signal(signal.SIGTERM, on_signal)
     import zmq
 
-    log.info("%s world server ready on %s (%s, pid %d, capabilities %s, step deadline %s)",
+    log.info("%s world server ready on %s (%s, pid %d, capabilities %s, deadlines: %s)",
              world.simulator_name, socket.getsockopt_string(zmq.LAST_ENDPOINT),
              world.simulator_version, os.getpid(),
              ", ".join(sorted(world.capabilities)) or "core only",
-             f"{step_deadline:g} s" if step_deadline else "off")
+             f"{step_deadline:g} s, world load {load_deadline:g} s" if step_deadline else "off")
     try:
         serve(socket, server, should_stop=lambda: stop["now"] or should_stop())
     finally:

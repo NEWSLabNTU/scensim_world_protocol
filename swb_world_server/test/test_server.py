@@ -2,6 +2,7 @@
 
     python3 -m unittest discover -s src/swb_world_server/test     # protobuf only
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -534,21 +535,25 @@ class LifetimeTest(unittest.TestCase):
         self.assertFalse(lifetime.is_gone(pb.ClientId(host="elsewhere", pid=1, start_time=1)))
 
 
-class BlockingWorld(FakeWorld):
-    """A world whose next step blocks until `release` is set (Isaac's PhysX after a reload)."""
+class RecordingDog:
+    """A watchdog that records what it was armed with."""
 
     def __init__(self):
-        super().__init__()
-        self.block = False
-        self.release = threading.Event()
+        self.armed = []
 
-    def step(self, drives, substeps, dt, render, sim_time):
-        if self.block:
-            self.release.wait(30)
-        return super().step(drives, substeps, dt, render, sim_time)
+    def step(self, label, deadline=None):
+        dog = self
+
+        class _Armed:
+            def __enter__(self):
+                dog.armed.append((label, deadline))
+
+            def __exit__(self, *_):
+                return False
+        return _Armed()
 
 
-# A world server in a process of its own whose second step blocks: `{block}` is how (a sleep
+# A world server in a process of its own whose `{where}` blocks: `{block}` is how (a sleep
 # lets go of the GIL, a catastrophic regex holds it).
 BLOCKED_SERVER = """
 import logging, re, sys, time
@@ -556,108 +561,120 @@ sys.path.insert(0, {root!r})
 sys.path.insert(0, {test!r})
 logging.basicConfig(level=logging.INFO)
 import test_server as t
+from swb_world_server import protocol as pb
 from swb_world_server.server import WorldServer
 from swb_world_server.watchdog import StepWatchdog
 
 class W(t.FakeWorld):
     n = 0
+    def load(self, *a, **k):
+        if {where!r} == "load":
+            {block}
+        return super().load(*a, **k)
     def step(self, *a):
         W.n += 1
-        if W.n == 2:
+        if {where!r} == "step" and W.n == 2:
             {block}
         return super().step(*a)
 
-server = WorldServer(W(), watchdog=StepWatchdog({deadline}, backstop={backstop}))
+server = WorldServer(W(), watchdog=StepWatchdog({deadline}))
+server.load_deadline = {load_deadline}
 assert t.hello(server).ok
 assert t.step(server).ok
 print("first step done", flush=True)
+t.call(server, load_world=pb.LoadWorld(world="town.usd"))
 t.step(server)
-print("second step returned", flush=True)
+print("returned", flush=True)
 """
 
 
-class StepDeadlineTest(unittest.TestCase):
-    """G70: a step past its deadline ends the process (exit 75) instead of hanging the run."""
+class RequestDeadlineTest(unittest.TestCase):
+    """G70: a request (or the loop between requests) past its deadline ends the world server,
+    from a watchdog child process, whatever the blocked thread holds."""
 
-    def test_a_normal_step_does_not_trip_it(self):
-        expired = []
-        dog = StepWatchdog(0.3, on_expire=lambda *a: expired.append(a), backstop=None)
+    def test_every_request_is_armed_and_a_load_with_its_own_deadline(self):
+        dog = RecordingDog()
         server = WorldServer(FakeWorld(), watchdog=dog)
+        server.load_deadline = 900.0
         hello(server)
-        for _ in range(5):
-            self.assertTrue(step(server).ok)
-        time.sleep(0.5)  # well past the deadline, with no step running
-        dog.close()
-        self.assertEqual(expired, [])
+        step(server)
+        call(server, load_world=pb.LoadWorld(world="town.usd"))
+        kinds = [label.split(" ")[0] for label, _ in dog.armed]
+        self.assertEqual(kinds, ["hello", "apply", "step", "load_world"])
+        self.assertEqual(dog.armed[2][0], "step 1 (3 x 0.0166667 s at sim time 0.000 s)")
+        self.assertEqual(dog.armed[3], ("load_world town.usd", 900.0))
+        self.assertTrue(all(d is None for _, d in dog.armed[:3]))  # the watchdog's own
 
-    def test_a_blocked_step_trips_it_and_names_the_step(self):
+    def test_the_child_expires_a_late_block_and_ignores_finished_ones(self):
+        from swb_world_server import watchdog
+        r, w = os.pipe()
         expired = []
-        world = BlockingWorld()
 
-        def on_expire(label, elapsed, deadline):
-            expired.append((label, elapsed, deadline))
-            world.release.set()  # a test cannot exit: unblock instead
-
-        dog = StepWatchdog(0.2, on_expire=on_expire, backstop=None)
-        server = WorldServer(world, watchdog=dog)
-        hello(server)
-        self.assertTrue(step(server).ok)
-        world.block = True
-        t0 = time.monotonic()
-        self.assertTrue(step(server).ok)
-        dog.close()
+        def feed():
+            os.write(w, b"begin 0.3 hello request (frame 0)\nend\n")
+            os.write(w, b"begin 0.3 step 2 (3 x 0.0166667 s at sim time 0.050 s)\n")
+            time.sleep(1.0)
+            os.close(w)
+        t = threading.Thread(target=feed)
+        t.start()
+        with os.fdopen(r, "rb", buffering=0) as stream:
+            t0 = time.monotonic()
+            watchdog.watch(1234, stream, expire=lambda *a: expired.append(a))
+            took = time.monotonic() - t0
+        t.join()
         self.assertEqual(len(expired), 1)
-        label, elapsed, deadline = expired[0]
-        self.assertTrue(label.startswith("step 2 (3 x 0.0166667 s at sim time 0.050 s)"), label)
-        self.assertGreaterEqual(elapsed, 0.2)
-        self.assertLess(time.monotonic() - t0, 5)
-        self.assertEqual(deadline, 0.2)
+        parent, label, elapsed, deadline = expired[0]
+        self.assertEqual((parent, label, deadline),
+                         (1234, "step 2 (3 x 0.0166667 s at sim time 0.050 s)", 0.3))
+        self.assertGreaterEqual(elapsed, 0.3)
+        self.assertLess(took, 0.9)  # at the deadline, not at the end of the stream
 
-    def test_a_stderr_without_a_descriptor_costs_the_backstop_not_the_step(self):
-        import io
-        dog = StepWatchdog(5.0, backstop=1.0)
-        server = WorldServer(FakeWorld(), watchdog=dog)
-        hello(server)
-        saved, sys.stderr = sys.stderr, io.StringIO()  # an embedding app's stderr
-        try:
-            with self.assertLogs("swb_world_server", "WARNING") as logs:
-                self.assertTrue(step(server).ok)
-        finally:
-            sys.stderr = saved
-        dog.close()
-        self.assertIsNone(dog.backstop)
-        self.assertIn("backstop unavailable", logs.output[0])
-        self.assertTrue(step(server).ok)
+    def test_the_child_returns_when_the_world_server_closes_the_pipe(self):
+        from swb_world_server import watchdog
+        r, w = os.pipe()
+        os.write(w, b"begin 30 step 1 (x)\n")
+        os.close(w)
+        with os.fdopen(r, "rb", buffering=0) as stream:
+            t0 = time.monotonic()
+            watchdog.watch(1234, stream, expire=lambda *a: self.fail("expired"))
+        self.assertLess(time.monotonic() - t0, 2)
 
-    def test_off_means_no_watchdog_thread(self):
+    def test_off_means_no_child(self):
         dog = StepWatchdog(None)
-        self.assertIsNone(dog._thread)
+        self.assertIsNone(dog._proc)
         server = WorldServer(FakeWorld(), watchdog=dog)
         hello(server)
         self.assertTrue(step(server).ok)
 
-    def blocked(self, block, deadline=0.3, backstop=None):
+    def blocked(self, where, block, deadline=0.5, load_deadline=0.5):
         here = Path(__file__).resolve()
         code = BLOCKED_SERVER.format(root=str(here.parents[1]), test=str(here.parent),
-                                     block=block, deadline=deadline, backstop=backstop)
+                                     where=where, block=block, deadline=deadline,
+                                     load_deadline=load_deadline)
         return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                               timeout=60)
 
-    def test_the_process_exits_75_with_one_line_and_the_stacks(self):
-        r = self.blocked("time.sleep(30)")
-        self.assertEqual(r.returncode, 75, r.stderr[-2000:])
+    def test_a_blocked_load_is_killed_with_its_name_and_the_stacks(self):
+        r = self.blocked("load", "time.sleep(30)")
+        self.assertEqual(r.returncode, -9, r.stderr[-2000:])
         self.assertIn("first step done", r.stdout)
-        self.assertNotIn("second step returned", r.stdout)
-        self.assertRegex(r.stderr, r"step 2 \(3 x 0\.0166667 s at sim time 0\.050 s\) has run "
-                         r"0\.\d s, past the step deadline of 0\.3 s: exiting 75")
-        self.assertIn("in step", r.stderr)  # faulthandler's stack of the blocked thread
+        self.assertNotIn("returned", r.stdout)
+        self.assertRegex(r.stderr, r"load_world town\.usd has run 0\.\d s, past its deadline "
+                         r"of 0\.5 s: ending world server \d+ for a fresh one")
+        self.assertIn("in load", r.stderr)  # faulthandler's dump of the blocked thread
 
-    def test_a_step_that_holds_the_gil_meets_faulthandlers_backstop(self):
-        # the Python watchdog cannot run while the step holds the GIL: the C one ends it
-        r = self.blocked("re.match(r'(a+)+$', 'a' * 40 + 'b')", deadline=0.2, backstop=0.3)
-        self.assertEqual(r.returncode, 1, r.stderr[-2000:])
-        self.assertNotIn("second step returned", r.stdout)
-        self.assertIn("Timeout (0:00:00.500000)!", r.stderr)
+    def test_a_step_that_holds_the_gil_is_killed_all_the_same(self):
+        r = self.blocked("step", "re.match(r'(a+)+$', 'a' * 40 + 'b')")
+        self.assertEqual(r.returncode, -9, r.stderr[-2000:])
+        self.assertRegex(r.stderr, r"step 2 \(3 x 0\.0166667 s at sim time 0\.050 s\) has run "
+                         r"0\.\d s, past its deadline of 0\.5 s")
+
+    def test_a_server_that_ends_takes_its_watchdog_with_it(self):
+        dog = StepWatchdog(5.0)
+        child = dog._proc
+        self.assertIsNone(child.poll())
+        dog.close()
+        self.assertIsNotNone(child.poll())
 
 
 class DescriptorTest(unittest.TestCase):
