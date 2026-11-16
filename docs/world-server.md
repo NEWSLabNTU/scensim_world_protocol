@@ -295,7 +295,7 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 | (the server becomes ready) | only when the server was not ready: up to 60 s of `Hello`s for `ready: true`, else this fails and the run ends |
 | load a world | `LoadWorld` (step time 0.05 s, realtime factor 1, map origin 0, the `--map` paths) answers a `LoadWorldReply`, within 300 s |
 | the time is past BASE_NS and the episode named | `LoadWorldReply.sim_time_ns >= BASE_NS` and `episode_id != 0` |
-| spawn the ego | `Spawn` of `conformance_ego`, `EGO`, `EXTERNAL`, at (0, 0, 0.5) with the Model 3's box (centre (1.415, 0, 0.744), 4.792 x 2.163 x 1.488 m), model `vehicle.tesla.model3`, answers a nonzero handle |
+| spawn the ego | `Spawn` of `conformance_ego`, `EGO`, `EXTERNAL`, at (0, 0, 0.5) with the Model 3's box (centre (1.415, 0, 0.744), 4.792 x 2.163 x 1.488 m), model `vehicle.tesla.model3`, answers a nonzero handle (within the spawn timeout below: an ego waits for its sensors' first frames; a first Isaac ego spawn took 27 s on 2026-11-17) |
 | spawn a kinematic vehicle | `conformance_npc`, `VEHICLE`, `KINEMATIC`, at (20, 0, 0.5) |
 | a second entity of one name is refused | `conformance_npc` again is refused |
 | five frames of Apply and Step | five times: `Apply` (the NPC posed 1 m further in x each frame, the ego listed with nothing set) and `Step` (`want_states`) both answer. Each step is 0.05 s, split into `ceil(0.05 / max_physics_dt)` substeps when `max_physics_dt > 0` |
@@ -318,5 +318,5 @@ A core-only server runs 20 checks (21 with `--slope`). Not checked here: `AGENT_
 `CONTACTS`, `AUTOPILOT`, and `Body.wheels` and `spec_hash` (the bridge checks those against
 the catalog at a real ego's spawn).
 
-Request timeouts: `Hello` 2 s, `Spawn` 20 s, `Apply` 10 s, `Step` 60 s, `LoadWorld` and
+Request timeouts: `Hello` 2 s, `Spawn` 120 s (the bridge's `load_timeout_seconds` default), `Apply` 10 s, `Step` 60 s, `LoadWorld` and
 `SetWeather` 300 s. A server that does not answer in time fails that check.

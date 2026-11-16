@@ -69,12 +69,17 @@ pub struct WorldConfig {
     pub render: bool,
 }
 
+/// The bridge's default bound on a `LoadWorld` and on every `Spawn`, s
+/// ([`WorldConfig::load_timeout_seconds`]); `swb_world_check conformance` waits as long for a
+/// spawn, so it holds a server to the bound its client uses (077 item 56).
+pub const DEFAULT_LOAD_TIMEOUT_SECONDS: u64 = 120;
+
 impl Default for WorldConfig {
     fn default() -> Self {
         Self {
             endpoint: "tcp://127.0.0.1:5590".to_string(),
             request_timeout_seconds: 10,
-            load_timeout_seconds: 120,
+            load_timeout_seconds: DEFAULT_LOAD_TIMEOUT_SECONDS,
             render: false,
         }
     }

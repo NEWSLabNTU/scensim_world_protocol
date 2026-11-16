@@ -43,6 +43,10 @@ use wire::request::Request as Q;
 
 const TIMEOUT: Duration = Duration::from_secs(2);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// A spawn's bound: the bridge's (`load_timeout_seconds`' default), since an ego waits for its
+/// sensors' first frames and a body's first render compiles its materials (a first Isaac
+/// ego spawn took 27 s, 077 item 56).
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(swb_core::config::DEFAULT_LOAD_TIMEOUT_SECONDS);
 const STEP: f64 = 0.05;
 
 fn usage() -> ExitCode {
@@ -248,7 +252,7 @@ fn spawn(
             box_declared: true,
             ..Default::default()
         }),
-        TIMEOUT * 10,
+        SPAWN_TIMEOUT,
     )?;
     match reply.reply {
         Some(wire::reply::Reply::Spawn(s)) if s.handle != 0 => Ok(s),
@@ -1181,4 +1185,21 @@ fn rtt(endpoint: &str, n: usize, gap: Duration) -> ExitCode {
         at(1.0)
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swb_core::config::WorldConfig;
+
+    /// Conformance holds a server to the contract its client uses: a spawn gets the bridge's
+    /// bound, not a shorter one of its own (077 item 56: Isaac's first ego spawn, 27 s).
+    #[test]
+    fn a_spawn_waits_as_long_as_the_bridge_does() {
+        assert_eq!(
+            SPAWN_TIMEOUT,
+            Duration::from_secs(WorldConfig::default().load_timeout_seconds)
+        );
+        assert!(SPAWN_TIMEOUT > Duration::from_secs(27));
+    }
 }
