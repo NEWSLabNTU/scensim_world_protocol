@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -14,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from swb_world_server import lifetime  # noqa: E402
 from swb_world_server import protocol as pb  # noqa: E402
 from swb_world_server.server import Drive, WorldServer  # noqa: E402
+from swb_world_server.watchdog import StepWatchdog  # noqa: E402
 from swb_world_server.world import World  # noqa: E402
 
 
@@ -529,6 +532,132 @@ class LifetimeTest(unittest.TestCase):
         self.assertTrue(lifetime.is_gone(pb.ClientId(host=me.host, pid=2**22 + 7, start_time=1)))
         # Another host is never provably gone.
         self.assertFalse(lifetime.is_gone(pb.ClientId(host="elsewhere", pid=1, start_time=1)))
+
+
+class BlockingWorld(FakeWorld):
+    """A world whose next step blocks until `release` is set (Isaac's PhysX after a reload)."""
+
+    def __init__(self):
+        super().__init__()
+        self.block = False
+        self.release = threading.Event()
+
+    def step(self, drives, substeps, dt, render, sim_time):
+        if self.block:
+            self.release.wait(30)
+        return super().step(drives, substeps, dt, render, sim_time)
+
+
+# A world server in a process of its own whose second step blocks: `{block}` is how (a sleep
+# lets go of the GIL, a catastrophic regex holds it).
+BLOCKED_SERVER = """
+import logging, re, sys, time
+sys.path.insert(0, {root!r})
+sys.path.insert(0, {test!r})
+logging.basicConfig(level=logging.INFO)
+import test_server as t
+from swb_world_server.server import WorldServer
+from swb_world_server.watchdog import StepWatchdog
+
+class W(t.FakeWorld):
+    n = 0
+    def step(self, *a):
+        W.n += 1
+        if W.n == 2:
+            {block}
+        return super().step(*a)
+
+server = WorldServer(W(), watchdog=StepWatchdog({deadline}, backstop={backstop}))
+assert t.hello(server).ok
+assert t.step(server).ok
+print("first step done", flush=True)
+t.step(server)
+print("second step returned", flush=True)
+"""
+
+
+class StepDeadlineTest(unittest.TestCase):
+    """G70: a step past its deadline ends the process (exit 75) instead of hanging the run."""
+
+    def test_a_normal_step_does_not_trip_it(self):
+        expired = []
+        dog = StepWatchdog(0.3, on_expire=lambda *a: expired.append(a), backstop=None)
+        server = WorldServer(FakeWorld(), watchdog=dog)
+        hello(server)
+        for _ in range(5):
+            self.assertTrue(step(server).ok)
+        time.sleep(0.5)  # well past the deadline, with no step running
+        dog.close()
+        self.assertEqual(expired, [])
+
+    def test_a_blocked_step_trips_it_and_names_the_step(self):
+        expired = []
+        world = BlockingWorld()
+
+        def on_expire(label, elapsed, deadline):
+            expired.append((label, elapsed, deadline))
+            world.release.set()  # a test cannot exit: unblock instead
+
+        dog = StepWatchdog(0.2, on_expire=on_expire, backstop=None)
+        server = WorldServer(world, watchdog=dog)
+        hello(server)
+        self.assertTrue(step(server).ok)
+        world.block = True
+        t0 = time.monotonic()
+        self.assertTrue(step(server).ok)
+        dog.close()
+        self.assertEqual(len(expired), 1)
+        label, elapsed, deadline = expired[0]
+        self.assertTrue(label.startswith("step 2 (3 x 0.0166667 s at sim time 0.050 s)"), label)
+        self.assertGreaterEqual(elapsed, 0.2)
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertEqual(deadline, 0.2)
+
+    def test_a_stderr_without_a_descriptor_costs_the_backstop_not_the_step(self):
+        import io
+        dog = StepWatchdog(5.0, backstop=1.0)
+        server = WorldServer(FakeWorld(), watchdog=dog)
+        hello(server)
+        saved, sys.stderr = sys.stderr, io.StringIO()  # an embedding app's stderr
+        try:
+            with self.assertLogs("swb_world_server", "WARNING") as logs:
+                self.assertTrue(step(server).ok)
+        finally:
+            sys.stderr = saved
+        dog.close()
+        self.assertIsNone(dog.backstop)
+        self.assertIn("backstop unavailable", logs.output[0])
+        self.assertTrue(step(server).ok)
+
+    def test_off_means_no_watchdog_thread(self):
+        dog = StepWatchdog(None)
+        self.assertIsNone(dog._thread)
+        server = WorldServer(FakeWorld(), watchdog=dog)
+        hello(server)
+        self.assertTrue(step(server).ok)
+
+    def blocked(self, block, deadline=0.3, backstop=None):
+        here = Path(__file__).resolve()
+        code = BLOCKED_SERVER.format(root=str(here.parents[1]), test=str(here.parent),
+                                     block=block, deadline=deadline, backstop=backstop)
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                              timeout=60)
+
+    def test_the_process_exits_75_with_one_line_and_the_stacks(self):
+        r = self.blocked("time.sleep(30)")
+        self.assertEqual(r.returncode, 75, r.stderr[-2000:])
+        self.assertIn("first step done", r.stdout)
+        self.assertNotIn("second step returned", r.stdout)
+        self.assertRegex(r.stderr, r"step 2 \(3 x 0\.0166667 s at sim time 0\.050 s\) has run "
+                         r"0\.\d s, past the step deadline of 0\.3 s: exiting 75")
+        self.assertIn("in step", r.stderr)  # faulthandler's stack of the blocked thread
+
+    def test_a_step_that_holds_the_gil_meets_faulthandlers_backstop(self):
+        # the Python watchdog cannot run while the step holds the GIL: the C one ends it
+        r = self.blocked("re.match(r'(a+)+$', 'a' * 40 + 'b')", deadline=0.2, backstop=0.3)
+        self.assertEqual(r.returncode, 1, r.stderr[-2000:])
+        self.assertNotIn("second step returned", r.stdout)
+        self.assertIn("Timeout (0:00:00.500000)!", r.stderr)
 
 
 class DescriptorTest(unittest.TestCase):

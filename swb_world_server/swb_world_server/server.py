@@ -17,6 +17,7 @@ import uuid
 
 from . import lifetime
 from . import protocol as pb
+from .watchdog import STEP_DEADLINE, StepWatchdog
 from .world import Drive, World  # noqa: F401 - re-exported for World implementations
 
 log = logging.getLogger("swb_world_server")
@@ -78,8 +79,10 @@ class RequestError(Exception):
 
 class WorldServer:
     def __init__(self, world, lease_seconds=LEASE_SECONDS, clock=time.monotonic,
-                 is_gone=lifetime.is_gone):
+                 is_gone=lifetime.is_gone, watchdog=None):
         self.world = world
+        # Every step under a deadline (G70); `run` gives it one, a test may give its own.
+        self.watchdog = watchdog or StepWatchdog(None)
         self.capabilities = {pb.CAPABILITY[c] for c in world.capabilities}
         self.lease_seconds = lease_seconds
         self.clock = clock
@@ -285,8 +288,10 @@ class WorldServer:
             raise RequestError("Step carries no poses since protocol 4: send them by Apply")
         drives, self.pending = self.pending, {}
         started = time.perf_counter()
-        states, contacts = self.world.step(drives, req.substeps, req.dt, req.render,
-                                           self.sim_time)
+        with self.watchdog.step(f"step {self.frame + 1} ({req.substeps} x {req.dt:g} s at sim "
+                                f"time {self.sim_time:.3f} s)"):
+            states, contacts = self.world.step(drives, req.substeps, req.dt, req.render,
+                                               self.sim_time)
         elapsed = time.perf_counter() - started
         self.step_ms.append(1e3 * elapsed)
         self.sim_time += req.substeps * req.dt
@@ -413,10 +418,11 @@ def bind(port, host="127.0.0.1"):
     return socket
 
 
-def run(world, socket, should_stop=lambda: False):
+def run(world, socket, should_stop=lambda: False, step_deadline=STEP_DEADLINE):
     """Serve `world` on the bound `socket` until `Shutdown`, SIGINT/SIGTERM or
-    `should_stop()`."""
-    server = WorldServer(world)
+    `should_stop()`. A step that runs past `step_deadline` seconds ends the process with exit
+    75 (`watchdog`, roadmap 077 G70); `None` or 0: no deadline."""
+    server = WorldServer(world, watchdog=StepWatchdog(step_deadline))
     stop = {"now": False}
 
     def on_signal(signum, _frame):
@@ -427,15 +433,17 @@ def run(world, socket, should_stop=lambda: False):
     signal.signal(signal.SIGTERM, on_signal)
     import zmq
 
-    log.info("%s world server ready on %s (%s, pid %d, capabilities %s)",
+    log.info("%s world server ready on %s (%s, pid %d, capabilities %s, step deadline %s)",
              world.simulator_name, socket.getsockopt_string(zmq.LAST_ENDPOINT),
              world.simulator_version, os.getpid(),
-             ", ".join(sorted(world.capabilities)) or "core only")
+             ", ".join(sorted(world.capabilities)) or "core only",
+             f"{step_deadline:g} s" if step_deadline else "off")
     try:
         serve(socket, server, should_stop=lambda: stop["now"] or should_stop())
     finally:
         log.info("world server stopping after %d step(s), sim time %.3f s",
                  server.frame, server.sim_time)
+        server.watchdog.close()
         socket.close(linger=0)
         world.close()
     return server
