@@ -131,7 +131,10 @@ fn hello(endpoint: &str, wait: f64, quiet: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    let start = Instant::now();
+    let mut tries = 0u32;
     loop {
+        tries += 1;
         match client.hello(true, TIMEOUT) {
             Ok(h) => {
                 if !quiet {
@@ -142,7 +145,16 @@ fn hello(endpoint: &str, wait: f64, quiet: bool) -> ExitCode {
             Err(e) => {
                 if Instant::now() >= deadline {
                     if !quiet {
-                        println!("world server at {endpoint}: {e}");
+                        // the last try's error, and how long it was waited for in all: a
+                        // reader seeing only "within 2 s" took a full --wait for none
+                        if tries > 1 {
+                            println!(
+                                "world server at {endpoint}: {e} (the last of {tries} tries over {:.0} s)",
+                                start.elapsed().as_secs_f64()
+                            );
+                        } else {
+                            println!("world server at {endpoint}: {e}");
+                        }
                     }
                     return ExitCode::from(1);
                 }
