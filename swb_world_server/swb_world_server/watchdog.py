@@ -15,7 +15,8 @@ is installed; then SIGUSR2, on which faulthandler dumps every thread from a C ha
 SIGKILLs it. Its supervisor (play_launch, launch_ros) starts a fresh one, and the bridge,
 which ended its own wait, finds the fresh one on its next Hello. The child needs no GIL and
 nothing of the world server's threads; it exits when the pipe closes (the world server is
-gone) and asks the kernel to end it with its parent.
+gone) and asks the kernel to end it with its parent (SIGKILL); it ignores SIGINT and
+SIGTERM, which a stop sends the whole group, so it never ends before the world server.
 
 Deadlines: a step 180 s, far above a legitimate slow one (a first Isaac spawn took 68-75 s,
 077 G65); a world load 900 s, since a first Isaac load takes minutes. `None` or 0: none.
@@ -109,9 +110,11 @@ class _Armed:
 
 
 def _die_with_parent():
+    # SIGKILL, not SIGTERM: the child ignores SIGTERM (main), so only this ends it with its
+    # parent, should the pipe somehow stay open
     try:
         import ctypes
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, int(signal.SIGTERM), 0, 0, 0)
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, int(signal.SIGKILL), 0, 0, 0)
     except OSError:
         pass
 
@@ -175,7 +178,12 @@ def watch(parent, stream, clock=time.monotonic, expire=_expire):
 
 def main():
     _die_with_parent()
-    signal.signal(signal.SIGINT, signal.SIG_IGN)  # a terminal's Ctrl-C is the parent's
+    # A terminal's Ctrl-C, and a launcher's stop of the whole group, are the parent's: the
+    # child outlives neither (pipe EOF, parent-death SIGKILL) and must not end before it.
+    # Ending first, it left the parent logging "the watchdog process is gone" at every stop
+    # (241, 2026-11-16), and left a parent that stops slowly without its deadline.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     watch(int(sys.argv[1]), sys.stdin.buffer)
 
 

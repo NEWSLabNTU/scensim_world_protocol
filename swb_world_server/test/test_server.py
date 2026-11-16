@@ -4,6 +4,7 @@
 """
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -675,6 +676,64 @@ class RequestDeadlineTest(unittest.TestCase):
         self.assertIsNone(child.poll())
         dog.close()
         self.assertIsNotNone(child.poll())
+
+
+# A world server that stops on SIGTERM as a launcher stops its group: `{stop}` is how long
+# its stop takes, and `{armed}` whether the stop runs under a deadline of 1 s.
+STOPPING_SERVER = """
+import logging, signal, sys, time
+sys.path.insert(0, {root!r})
+logging.basicConfig(level=logging.INFO)
+from swb_world_server.watchdog import StepWatchdog
+dog = StepWatchdog(60.0)
+print("child", dog._proc.pid, flush=True)
+stopping = []
+signal.signal(signal.SIGTERM, lambda *_: stopping.append(1))
+while not stopping:
+    with dog.step("idle"):
+        time.sleep(0.05)
+if {armed}:
+    with dog.step("the stop", deadline=1.0):
+        time.sleep({stop})
+else:
+    with dog.step("the stop"):  # writes to the child after the group's SIGTERM
+        time.sleep({stop})
+dog.close()
+print("stopped", flush=True)
+"""
+
+
+class StopTest(unittest.TestCase):
+    """G70 follow-up: the group's stop signal is the world server's; its watchdog child
+    outlives it, so no "the watchdog process is gone" at a stop, and keeps its deadline."""
+
+    def stop(self, stop, armed):
+        root = str(Path(__file__).resolve().parents[1])
+        code = STOPPING_SERVER.format(root=root, stop=stop, armed=armed)
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, start_new_session=True)
+        child = int(p.stdout.readline().split()[1])
+        time.sleep(0.5)
+        os.killpg(p.pid, signal.SIGTERM)  # as play_launch or ros2 launch stops a group
+        time.sleep(0.2)
+        alive_after_term = os.path.exists(f"/proc/{child}")
+        out, err = p.communicate(timeout=30)
+        time.sleep(0.3)
+        return p.returncode, out, err, alive_after_term, os.path.exists(f"/proc/{child}")
+
+    def test_the_child_outlives_the_stop_and_ends_with_the_parent(self):
+        rc, out, err, alive_after_term, alive_at_end = self.stop(1.0, armed=False)
+        self.assertEqual(rc, 0, err[-2000:])
+        self.assertIn("stopped", out)
+        self.assertTrue(alive_after_term)   # the SIGTERM did not end it
+        self.assertFalse(alive_at_end)      # the closed pipe did
+        self.assertNotIn("watchdog process is gone", err)
+
+    def test_a_stop_past_its_deadline_is_killed_all_the_same(self):
+        rc, out, err, _, alive_at_end = self.stop(30.0, armed=True)
+        self.assertEqual(rc, -9, err[-2000:])
+        self.assertRegex(err, r"the stop has run 1\.\d s, past its deadline of 1 s")
+        self.assertFalse(alive_at_end)
 
 
 class DescriptorTest(unittest.TestCase):
