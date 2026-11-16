@@ -438,13 +438,15 @@ def bind(port, host="127.0.0.1"):
 
 
 def run(world, socket, should_stop=lambda: False, step_deadline=STEP_DEADLINE,
-        load_deadline=LOAD_DEADLINE):
+        load_deadline=LOAD_DEADLINE, watchdog=None):
     """Serve `world` on the bound `socket` until `Shutdown`, SIGINT/SIGTERM or
     `should_stop()`. A request (or the loop between them) that runs past its deadline,
     `load_deadline` for a LoadWorld and `step_deadline` for the rest, ends the process: a
     watchdog child process dumps its stacks and kills it, for its supervisor to start a fresh
-    one (`watchdog`, roadmap 077 G70). `None` or 0: no deadline."""
-    server = WorldServer(world, watchdog=StepWatchdog(step_deadline))
+    one (`watchdog`, roadmap 077 G70). `None` or 0: no deadline. `watchdog`: a
+    `StepWatchdog` the caller started earlier (to watch its own start, csb issue 042),
+    used instead of a new one with `step_deadline`; it is closed when the server ends."""
+    server = WorldServer(world, watchdog=watchdog or StepWatchdog(step_deadline))
     server.load_deadline = load_deadline
     stop = {"now": False}
 
@@ -456,6 +458,7 @@ def run(world, socket, should_stop=lambda: False, step_deadline=STEP_DEADLINE,
     signal.signal(signal.SIGTERM, on_signal)
     import zmq
 
+    step_deadline = getattr(server.watchdog, "deadline", step_deadline)
     log.info("%s world server ready on %s (%s, pid %d, capabilities %s, deadlines: %s)",
              world.simulator_name, socket.getsockopt_string(zmq.LAST_ENDPOINT),
              world.simulator_version, os.getpid(),

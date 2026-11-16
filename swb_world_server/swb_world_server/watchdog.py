@@ -18,6 +18,14 @@ nothing of the world server's threads; it exits when the pipe closes (the world 
 gone) and asks the kernel to end it with its parent (SIGKILL); it ignores SIGINT and
 SIGTERM, which a stop sends the whole group, so it never ends before the world server.
 
+The child also ends the world server on a fatal line in a log file it is told to watch
+(`watch_log`): Kit's own log, written by Kit's C logger, where Kit's FATAL messages land
+(issue 011). Watching from here, no Python runs on Kit's log path: a Python omni.log consumer
+in the world server took the GIL for every message, and a PhysX cooking task logging from a
+worker thread then waited for the GIL that the main thread, waiting for the task, held
+(csb issue 042). A timer in the world server cannot watch a thread that holds the GIL either,
+so the world server's start is a block like any other, with its own deadline.
+
 Deadlines: a step 180 s, far above a legitimate slow one (a first Isaac spawn took 68-75 s,
 077 G65); a world load 900 s, since a first Isaac load takes minutes. `None` or 0: none.
 """
@@ -36,6 +44,7 @@ STEP_DEADLINE = 180.0  # s: every request and loop pass but a world load
 LOAD_DEADLINE = 900.0  # s: LoadWorld
 DUMP_SIGNAL = signal.SIGUSR2  # faulthandler's dump of every thread, from a C handler
 DUMP_WAIT = 3.0  # s for the dumps before the kill
+LOG_POLL = 0.5  # s between looks at a watched log file
 
 
 class StepWatchdog:
@@ -73,6 +82,14 @@ class StepWatchdog:
         except (BrokenPipeError, ValueError, OSError):
             log.error("request deadline: the watchdog process is gone; no deadline from now on")
             self._proc = None
+
+    def watch_log(self, path, marker):
+        """From now on the child ends this process at a line of the file `path` holding
+        `marker` (Kit's log and its `] [Fatal] [`), from the file's start: a fatal logged
+        before the call counts too. The file need not exist yet."""
+        if "\t" in marker or "\n" in marker or "\n" in str(path):
+            raise ValueError("a watched log's marker and path take no tab or newline")
+        self._send(f"log\t{marker}\t{path}\n")
 
     def _begin(self, label, deadline):
         d = deadline or self.deadline
@@ -128,6 +145,15 @@ def _say(msg):
 def _expire(parent, label, elapsed, deadline, kill=os.kill):
     _say(f"{label} has run {elapsed:.1f} s, past its deadline of {deadline:g} s: ending world "
          f"server {parent} for a fresh one")
+    _end_parent(parent, kill)
+
+
+def _fatal(parent, path, line, kill=os.kill):
+    _say(f"fatal in {path}: {line.strip()}: ending world server {parent} for a fresh one")
+    _end_parent(parent, kill)
+
+
+def _end_parent(parent, kill=os.kill):
     spy = shutil.which("py-spy")
     if spy:
         try:
@@ -145,22 +171,58 @@ def _expire(parent, label, elapsed, deadline, kill=os.kill):
         pass
 
 
-def watch(parent, stream, clock=time.monotonic, expire=_expire):
-    """Read `begin <deadline> <label>` / `end` lines from `stream` (a binary pipe) and call
-    `expire(parent, label, elapsed, deadline)` when a begun block outlives its deadline.
-    Returns at end of stream (the parent closed it or died)."""
+class _LogWatch:
+    """A log file read as it grows, for lines holding a marker."""
+
+    def __init__(self, path, marker):
+        self.path, self.marker = path, marker.encode()
+        self.f, self.buf = None, b""
+
+    def fatal_line(self):
+        """The first new line holding the marker, or None."""
+        if self.f is None:
+            try:
+                self.f = open(self.path, "rb")
+            except OSError:
+                return None
+        while True:
+            chunk = self.f.read(65536)
+            if not chunk:
+                return None
+            self.buf += chunk
+            *lines, self.buf = self.buf.split(b"\n")
+            for line in lines:
+                if self.marker in line:
+                    return line.decode(errors="replace")
+
+
+def watch(parent, stream, clock=time.monotonic, expire=_expire, fatal=_fatal):
+    """Read `begin <deadline> <label>` / `end` / `log<TAB><marker><TAB><path>` lines from
+    `stream` (a binary pipe). Call `expire(parent, label, elapsed, deadline)` when a begun
+    block outlives its deadline, and `fatal(parent, path, line)` at a line of a watched log
+    holding its marker. Returns after either, or at end of stream (the parent closed it or
+    died)."""
     import selectors
 
     sel = selectors.DefaultSelector()
     sel.register(stream, selectors.EVENT_READ)
     buf = b""
     current = None  # (label, started, deadline)
+    logs = []
     while True:
-        timeout = None if current is None else max(0.0, current[1] + current[2] - clock())
-        if current is not None and timeout == 0.0:
+        now = clock()
+        if current is not None and now >= current[1] + current[2]:
             label, started, deadline = current
-            expire(parent, label, clock() - started, deadline)
+            expire(parent, label, now - started, deadline)
             return
+        for lw in logs:
+            line = lw.fatal_line()
+            if line is not None:
+                fatal(parent, lw.path, line)
+                return
+        timeout = None if current is None else max(0.0, current[1] + current[2] - now)
+        if logs:
+            timeout = LOG_POLL if timeout is None else min(timeout, LOG_POLL)
         if not sel.select(timeout):
             continue
         chunk = os.read(stream.fileno(), 4096)
@@ -169,7 +231,13 @@ def watch(parent, stream, clock=time.monotonic, expire=_expire):
         buf += chunk
         while b"\n" in buf:
             line, buf = buf.split(b"\n", 1)
-            words = line.decode(errors="replace").split(" ", 2)
+            text = line.decode(errors="replace")
+            if text.startswith("log\t"):
+                parts = text.split("\t", 2)
+                if len(parts) == 3:
+                    logs.append(_LogWatch(parts[2], parts[1]))
+                continue
+            words = text.split(" ", 2)
             if words[0] == "begin" and len(words) == 3:
                 current = (words[2], clock(), float(words[1]))
             elif words[0] == "end":

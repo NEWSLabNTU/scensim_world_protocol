@@ -670,12 +670,96 @@ class RequestDeadlineTest(unittest.TestCase):
         self.assertRegex(r.stderr, r"step 2 \(3 x 0\.0166667 s at sim time 0\.050 s\) has run "
                          r"0\.\d s, past its deadline of 0\.5 s")
 
+    def test_the_child_ends_the_server_at_a_fatal_line_of_a_watched_log(self):
+        """csb issue 042 (011's exit on a Kit FATAL, from outside the world server): a
+        watched log that does not exist yet, then ordinary lines, then a fatal one."""
+        from swb_world_server import watchdog
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "kit.log")
+        r, w = os.pipe()
+        fatal = []
+
+        def feed():
+            os.write(w, f"log\t] [Fatal] [\t{path}\n".encode())
+            time.sleep(0.3)
+            with open(path, "a") as f:
+                f.write("[1ms] [Warning] [omni.physx.plugin] a warning\n")
+                f.flush()
+                time.sleep(0.6)
+                f.write("[2ms] [Fatal] [omni.rtx] Out of resource descriptors!\n")
+            time.sleep(3.0)
+            os.close(w)
+        t = threading.Thread(target=feed)
+        t.start()
+        with os.fdopen(r, "rb", buffering=0) as stream:
+            t0 = time.monotonic()
+            watchdog.watch(1234, stream, expire=lambda *a: self.fail("expired"),
+                           fatal=lambda *a: fatal.append(a))
+            took = time.monotonic() - t0
+        t.join()
+        shutil.rmtree(d)
+        self.assertEqual(fatal, [(1234, path, "[2ms] [Fatal] [omni.rtx] Out of resource "
+                                              "descriptors!")])
+        self.assertLess(took, 2.5)  # at the line, not at the end of the stream
+
+    def test_a_watched_log_without_a_fatal_line_ends_nothing(self):
+        from swb_world_server import watchdog
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "kit.log")
+        with open(path, "w") as f:
+            f.write("[1ms] [Error] [carb] not fatal\n[2ms] [Fatal] [x] no newline yet")
+        r, w = os.pipe()
+        os.write(w, f"log\t] [Fatal] [\t{path}\n".encode())
+
+        def close():
+            time.sleep(1.2)
+            os.close(w)
+        t = threading.Thread(target=close)
+        t.start()
+        with os.fdopen(r, "rb", buffering=0) as stream:
+            watchdog.watch(1234, stream, expire=lambda *a: self.fail("expired"),
+                           fatal=lambda *a: self.fail(f"fatal {a}"))
+        t.join()
+        shutil.rmtree(d)
+
+    def test_a_fatal_in_the_log_kills_a_server_that_holds_the_gil(self):
+        """042: the world server's main thread holds the GIL; a fatal line in its log still
+        ends it, because the child, not the world server, reads the log."""
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "kit.log")
+        here = Path(__file__).resolve()
+        code = FATAL_SERVER.format(root=str(here.parents[1]), path=path)
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           timeout=60)
+        shutil.rmtree(d)
+        self.assertEqual(r.returncode, -9, r.stderr[-2000:])
+        self.assertIn("holding the GIL", r.stdout)
+        self.assertRegex(r.stderr, r"fatal in .*kit\.log: \[3ms\] \[Fatal\] \[omni\.rtx\] gone: "
+                                   r"ending world server \d+ for a fresh one")
+
     def test_a_server_that_ends_takes_its_watchdog_with_it(self):
         dog = StepWatchdog(5.0)
         child = dog._proc
         self.assertIsNone(child.poll())
         dog.close()
         self.assertIsNotNone(child.poll())
+
+
+# A world server whose log gets a fatal line (written by another process, as Kit's C logger
+# writes its file without the GIL) while its main thread holds the GIL (csb issue 042).
+FATAL_SERVER = """
+import re, subprocess, sys, time
+sys.path.insert(0, {root!r})
+from swb_world_server.watchdog import StepWatchdog
+dog = StepWatchdog(60.0)
+dog.watch_log({path!r}, "] [Fatal] [")
+# Kit's C logger writes its file without the GIL: here a process of its own does
+subprocess.Popen(["sh", "-c", "sleep 0.5; echo '[3ms] [Fatal] [omni.rtx] gone' >> " + {path!r}])
+with dog.step("Kit's start and the preload", deadline=60.0):
+    print("holding the GIL", flush=True)
+    re.match(r'(a+)+$', 'a' * 40 + 'b')
+print("returned", flush=True)
+"""
 
 
 # A world server that stops on SIGTERM as a launcher stops its group: `{stop}` is how long
