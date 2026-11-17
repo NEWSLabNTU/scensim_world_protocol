@@ -1,6 +1,6 @@
 # The world protocol
 
-How the scenario bridge (scenario-world-bridge's `RemoteBackend`) drives a simulator's
+How the scenario bridge (scensim's `RemoteBackend`) drives a simulator's
 **world server**. The bridge knows no simulator: everything it asks of one goes over this
 protocol, and a simulator becomes a backend by serving it. The definition is
 [`proto/scensim_world.proto`](../proto/scensim_world.proto) (package `scensim_world`); this page says
@@ -318,5 +318,5 @@ server's death.
 protocol on the wire. `scensim_core`'s `SimBackend` seam and its shared world policy are typed in
 them. They must be byte-identical to the SSv2 fork's (`scenario_simulator_v2`,
 `simulation/simulation_interface/proto/`): a field added to one copy and not the other
-decodes as silence, not as an error. scenario-world-bridge's `just test` checks this
+decodes as silence, not as an error. scensim's `just test` checks this
 (`scripts/test_ssv2_protos.py`), since that repository holds both.

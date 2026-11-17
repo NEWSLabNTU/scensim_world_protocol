@@ -24,7 +24,7 @@
 //! Node positions come from the `local_x` / `local_y` / `ele` tags, and from `lat`/`lon`
 //! through Autoware's projection where a node has no tags (`local_from_lat_lon`). In a
 //! repaired map the tags are that projection (`scripts/repair_lanelet_local_coords.py` in
-//! scenario-world-bridge), in the ROS frame, so converting to CARLA is the usual Y-flip.
+//! scensim), in the ROS frame, so converting to CARLA is the usual Y-flip.
 //! [`TrafficLightElement::carla_position`] does that.
 //!
 //! Verified against the TUM-converted Town01 map: 36 traffic light ways, each with two

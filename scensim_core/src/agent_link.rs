@@ -766,7 +766,7 @@ pub fn ledger_path(host: &str, port: u16) -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("scenario-world-bridge")
+    base.join("scensim")
         .join(format!("agent-vehicles-{host}-{port}"))
 }
 

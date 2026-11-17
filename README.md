@@ -1,6 +1,6 @@
 # scensim_world_protocol
 
-The world protocol of [scenario-world-bridge](https://github.com/NEWSLabNTU/scenario-world-bridge):
+The world protocol of [scensim](https://github.com/NEWSLabNTU/scensim):
 how the scenario bridge drives a simulator's **world server**, whatever the simulator. The
 bridge knows no simulator; a simulator becomes a backend by serving this protocol and passing
 `scensim_world_check conformance`.
@@ -8,7 +8,7 @@ bridge knows no simulator; a simulator becomes a backend by serving this protoco
 | Path | What |
 |---|---|
 | `proto/scensim_world.proto` | The protocol (package `scensim_world`, version 4): `Hello` and the owner lease, capabilities, `LoadWorld`, `Spawn`, `Apply`, `Step`, signals, goals, weather, road condition, environment, `Release` |
-| `proto/*.proto` (the rest) | SSv2's `simulation_interface` message types, which `scensim_core`'s shared world code is typed in. Byte-identical to the SSv2 fork's; scenario-world-bridge's `just test` checks it |
+| `proto/*.proto` (the rest) | SSv2's `simulation_interface` message types, which `scensim_core`'s shared world code is typed in. Byte-identical to the SSv2 fork's; scensim's `just test` checks it |
 | `scensim_core/` | Rust: the world client (`world_client`), the server shell (`world_server`: the `World` trait, `Shell`, `serve`, the lease), simulation time (`sim_time`: `BASE_NS`, `nanos`, `sim_ns`), the `SimBackend` seam, and the world policy every Rust world server shares (entities, NPC tracking, gap trace, contacts, weather requests, maps) |
 | `scensim_world_server/` | Python: the server shell (`World` base class, `WorldServer`, `bind`, `run`, the lease, the clock and the episode, the request deadlines), on a descriptor set of the proto (`scensim_world.desc`). A request, or the loop between requests, that runs past its deadline (`run(step_deadline=180, load_deadline=900)`, s) is ended by a watchdog child process: its stacks dumped (py-spy when installed, faulthandler), then killed for its supervisor to start a fresh one (`watchdog.py`). A world server can start the watchdog itself before its simulator and pass it to `run(watchdog=)`, to put its own start under a deadline, and can have the child watch a log file for fatal lines (`StepWatchdog.watch_log`, Kit's log on Isaac), so that nothing of the kind runs in the world server's process (csb issue 042) |
 | `scensim_world_check/` | `scensim_world_check hello / conformance / rtt <endpoint>`: probe, conformance-check or time any world server |
@@ -45,5 +45,5 @@ just proto-desc  # regenerate scensim_world_server/scensim_world.desc after edit
 repository installs it.
 
 The CARLA and Isaac Sim world servers are
-[scensim_carla_world](https://github.com/NEWSLabNTU/swb_carla_world) (Rust shell) and
-[scensim_isaac_world](https://github.com/NEWSLabNTU/swb_isaac_world) (Python shell).
+[scensim_carla_world](https://github.com/NEWSLabNTU/scensim_carla_world) (Rust shell) and
+[scensim_isaac_world](https://github.com/NEWSLabNTU/scensim_isaac_world) (Python shell).

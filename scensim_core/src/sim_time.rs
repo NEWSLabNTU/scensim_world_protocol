@@ -15,7 +15,7 @@
 //! The world protocol reports the episode beside the time (`episode_id`).
 //!
 //! acb_bridge computes the same with its own copy of these two (it depends on no scensim
-//! repository); scenario-world-bridge's `scripts/test_sim_time.py` checks they agree.
+//! repository); scensim's `scripts/test_sim_time.py` checks they agree.
 
 /// 1000 s, in ns: added to every simulation time.
 pub const BASE_NS: i64 = 1_000_000_000_000;

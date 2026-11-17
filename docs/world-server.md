@@ -6,8 +6,8 @@ server only implements its world:
 
 | shell | language | used by |
 |---|---|---|
-| `scensim_world_server` | Python 3.9 or later, `pyzmq`, `protobuf` (3.12 to 7.x) | the Isaac Sim world server ([scensim_isaac_world](https://github.com/NEWSLabNTU/swb_isaac_world)) |
-| `scensim_core::world_server` | Rust | the CARLA world server ([scensim_carla_world](https://github.com/NEWSLabNTU/swb_carla_world)) |
+| `scensim_world_server` | Python 3.9 or later, `pyzmq`, `protobuf` (3.12 to 7.x) | the Isaac Sim world server ([scensim_isaac_world](https://github.com/NEWSLabNTU/scensim_isaac_world)) |
+| `scensim_core::world_server` | Rust | the CARLA world server ([scensim_carla_world](https://github.com/NEWSLabNTU/scensim_carla_world)) |
 
 A server is done when `scensim_world_check conformance` passes against it ("The conformance
 check", below).

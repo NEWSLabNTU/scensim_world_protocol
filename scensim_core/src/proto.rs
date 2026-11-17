@@ -49,7 +49,7 @@ pub mod std_msgs {
 }
 
 // SSv2's protos above are the fork's files byte for byte; the scenario bridge, which holds
-// the fork, checks that (scenario-world-bridge `just test`).
+// the fork, checks that (scensim's `just test`).
 
 /// scensim's world protocol with the Isaac Sim world server (`proto/scensim_world.proto`, roadmap
 /// 037): scensim's own, not SSv2's.
