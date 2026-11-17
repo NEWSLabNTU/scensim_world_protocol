@@ -190,7 +190,8 @@ exactly and leaves everything else where it is.
 import logging
 import sys
 
-sys.path.insert(0, "/path/to/scensim_world_protocol/scensim_world_server")
+# the shell: `scensim_world_server`, a ROS package (ament_python); with its install sourced
+# it is on PYTHONPATH, else: sys.path.insert(0, ".../scensim_world_protocol/scensim_world_server")
 
 from scensim_world_server import lifetime
 from scensim_world_server.server import bind, run
