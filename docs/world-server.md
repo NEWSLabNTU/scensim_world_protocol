@@ -6,10 +6,10 @@ server only implements its world:
 
 | shell | language | used by |
 |---|---|---|
-| `swb_world_server` | Python 3.9 or later, `pyzmq`, `protobuf` (3.12 to 7.x) | the Isaac Sim world server ([swb_isaac_world](https://github.com/NEWSLabNTU/swb_isaac_world)) |
-| `swb_core::world_server` | Rust | the CARLA world server ([swb_carla_world](https://github.com/NEWSLabNTU/swb_carla_world)) |
+| `scensim_world_server` | Python 3.9 or later, `pyzmq`, `protobuf` (3.12 to 7.x) | the Isaac Sim world server ([scensim_isaac_world](https://github.com/NEWSLabNTU/swb_isaac_world)) |
+| `scensim_core::world_server` | Rust | the CARLA world server ([scensim_carla_world](https://github.com/NEWSLabNTU/swb_carla_world)) |
 
-A server is done when `swb_world_check conformance` passes against it ("The conformance
+A server is done when `scensim_world_check conformance` passes against it ("The conformance
 check", below).
 
 ## What the shells do for you
@@ -39,16 +39,16 @@ The Python shell also refuses a `Spawn` whose box dimensions are not all positiv
 
 ## The Python shell
 
-`swb_world_server` is a plain Python package, not a ROS package: put the directory
-`swb_world_server/` of this repository on `sys.path` (or `PYTHONPATH`). It reads the protocol
-from `swb_world_server/swb_world.desc`, a descriptor set of `proto/swb_world.proto`, rather
+`scensim_world_server` is a plain Python package, not a ROS package: put the directory
+`scensim_world_server/` of this repository on `sys.path` (or `PYTHONPATH`). It reads the protocol
+from `scensim_world_server/scensim_world.desc`, a descriptor set of `proto/scensim_world.proto`, rather
 than generated `_pb2` code, so it works with any protobuf runtime. After editing the
 `.proto`, regenerate it with `just proto-desc` (needs `protoc`); the shell's tests fail while
 it is stale.
 
 ### `World`
 
-Subclass `swb_world_server.world.World`, set its class attributes and implement the core
+Subclass `scensim_world_server.world.World`, set its class attributes and implement the core
 methods. Poses are `((x, y, z), (qw, qx, qy, qz))` at the SSv2 entity origin, world frame;
 twists `((vx, vy, vz), (wx, wy, wz))`, world frame. A method raises to refuse; the message
 is the error the bridge passes on to SSv2.
@@ -72,7 +72,7 @@ is the error the bridge passes on to SSv2.
 | `reset(handles)` | | a new owner or a release: every entity goes, the world stays. Default: `despawn` each |
 | `close()` | | the server is stopping |
 
-`Drive` (a named tuple, `swb_world_server.world.Drive`): `pose`, `twist`, `teleport`,
+`Drive` (a named tuple, `scensim_world_server.world.Drive`): `pose`, `twist`, `teleport`,
 `kinematic`. A `KINEMATIC` body goes to `pose`. A `TRACKED` body takes `twist`, after being
 put at `pose` when `teleport`; with `kinematic` it is kinematic from this step on and goes to
 `pose`. Only entities whose `EntityPose` set a pose, a twist or `kinematic` are in `drives`:
@@ -126,8 +126,8 @@ The shapes the Python shell passes, for what the table above leaves to the docst
 - **`set_road_condition(friction_scale, wetness, properties)`**: `friction_scale` a float
   (1: as the map is); `wetness` one of OpenSCENARIO's levels as the scenario spells them (`"dry"`,
   `"moist"`, `"wetWithPuddles"`, `"lowFlooded"`, `"highFlooded"`; `"dry"` when not given); `properties` a dict
-  of str to str, the scenario's `swb.` properties, e.g.
-  `{"swb.zone.<zone>.class": "ice"}` for a zone your world defines (refuse a zone it does
+  of str to str, the scenario's `scensim.` properties, e.g.
+  `{"scensim.zone.<zone>.class": "ice"}` for a zone your world defines (refuse a zone it does
   not have, by name, with `ValueError`).
 - **`set_environment(weather, time_of_day, sim_time)`**: each argument holds only the parts
   given (a part not given is absent, not `None`), each replacing that part:
@@ -168,7 +168,7 @@ a `ValueError` into a `WeatherReply` with `success: false`.) `AGENT_VEHICLES` pa
 ### The entry point
 
 The shell has no `main`: a server writes its own, in three calls from
-`swb_world_server.server` and `swb_world_server.lifetime`:
+`scensim_world_server.server` and `scensim_world_server.lifetime`:
 
 - `lifetime.die_with_parent()`: SIGTERM when the parent dies (a supervisor killed with
   SIGKILL); exits 1 if the parent is already gone. Linux only, a no-op elsewhere. So the
@@ -190,11 +190,11 @@ exactly and leaves everything else where it is.
 import logging
 import sys
 
-sys.path.insert(0, "/path/to/swb_world_protocol/swb_world_server")
+sys.path.insert(0, "/path/to/scensim_world_protocol/scensim_world_server")
 
-from swb_world_server import lifetime
-from swb_world_server.server import bind, run
-from swb_world_server.world import World
+from scensim_world_server import lifetime
+from scensim_world_server.server import bind, run
+from scensim_world_server.world import World
 
 
 class FakeWorld(World):
@@ -231,15 +231,15 @@ if __name__ == "__main__":
 
 ```bash
 python3 fake_world.py &
-swb_world_check conformance tcp://127.0.0.1:5599     # 20 passed, 0 failed
+scensim_world_check conformance tcp://127.0.0.1:5599     # 20 passed, 0 failed
 ```
 
-The shell's own tests (`swb_world_server/test/test_server.py`) drive a similar fake world
+The shell's own tests (`scensim_world_server/test/test_server.py`) drive a similar fake world
 through `WorldServer.handle(bytes) -> bytes`, with no socket: the way to unit-test a world.
 
 ## The Rust shell
 
-`swb_core::world_server` (crate `swb_core`, a path dependency):
+`scensim_core::world_server` (crate `scensim_core`, a path dependency):
 
 - implement the trait `World`: `simulator_name`, `simulator_version`, `capabilities`,
   `load_world(&LoadWorld) -> LoadWorldReply`, `spawn(handle, &Spawn) -> Body`,
@@ -256,18 +256,18 @@ through `WorldServer.handle(bytes) -> bytes`, with no socket: the way to unit-te
   Python.
 
 The Rust world keeps its own clock and episode: fill `LoadWorldReply.sim_time_ns` and
-`StepReply.sim_time_ns` with `swb_core::sim_time::sim_ns(elapsed)`, and both `episode_id`s.
+`StepReply.sim_time_ns` with `scensim_core::sim_time::sim_ns(elapsed)`, and both `episode_id`s.
 It also holds the `Apply`'s drives for its `step` itself.
 
 ## The conformance check
 
 ```bash
-swb_world_check conformance <endpoint> [--map <lanelet2_map.osm or map dir>] [--slope X,Y,Z,YAW_DEG,PITCH_DEG]
-swb_world_check hello <endpoint> [--wait SECONDS] [--quiet]
-swb_world_check rtt <endpoint> [--n 2000] [--gap-us 0]
+scensim_world_check conformance <endpoint> [--map <lanelet2_map.osm or map dir>] [--slope X,Y,Z,YAW_DEG,PITCH_DEG]
+scensim_world_check hello <endpoint> [--wait SECONDS] [--quiet]
+scensim_world_check rtt <endpoint> [--n 2000] [--gap-us 0]
 ```
 
-`swb_world_check` is built by this repository (`just build`; `target/dev-release/`) and as
+`scensim_world_check` is built by this repository (`just build`; `target/dev-release/`) and as
 an ament_cargo package. The endpoint is the server's ZMQ address, such as
 `tcp://127.0.0.1:5591`.
 
@@ -289,7 +289,7 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 | a wrong protocol version is refused | a probe `Hello` of version 5 is refused |
 | a request before hello is refused | a `Step` from a client that has not said hello is refused |
 | hello takes ownership | `Hello` (not a probe) succeeds, and `HelloReply.owner` equals the check's `ClientId` |
-| a second bridge is refused while the owner lives | a `Hello` from another `ClientId` (host `swb-world-check-elsewhere`) is refused with an error containing `owned by` |
+| a second bridge is refused while the owner lives | a `Hello` from another `ClientId` (host `scensim-world-check-elsewhere`) is refused with an error containing `owned by` |
 | a second bridge's requests are refused | a `Step` from that client is refused |
 | a probe changes nothing | that client's probe `Hello` is answered with the same owner and the same `instance` |
 | (the server becomes ready) | only when the server was not ready: up to 60 s of `Hello`s for `ready: true`, else this fails and the run ends |
@@ -307,7 +307,7 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 | a tracked body follows at 5 m/s | with `TRACKS_TARGETS` or `TRACKED_MOTION`: a `TRACKED` vehicle at (60, 0, 0.5) is driven for 20 frames at 5 m/s (by pose and `ssv2_twist`, or by `twist`) and moves more than 2.5 m; under `TRACKS_TARGETS` the 20th `ApplyReply` has a `TrackingSample` for it. Skipped otherwise |
 | signal colours are taken / signals are refused without SIGNALS | with `SIGNALS`, an empty `SetSignals` succeeds; without, it is refused |
 | the weather is set and read back by parameter | with `WEATHER`: `GetWeather` succeeds with at least one parameter; the check takes the first name in sorted order, sets it alone (`use_parameters: true`) to its value + 1, reads it back within 1e-3 x max(1, abs(value)), then sets all the original parameters back. Skipped otherwise |
-| road condition (three checks) | with `ROAD_CONDITION`: friction 0.7 `wetWithPuddles` is taken; a property `swb.zone.swb_check_no_such_zone.class` is refused with the zone's id in the error; friction 1 `dry` is taken. Skipped otherwise |
+| road condition (three checks) | with `ROAD_CONDITION`: friction 0.7 `wetWithPuddles` is taken; a property `scensim.zone.scensim_check_no_such_zone.class` is refused with the zone's id in the error; friction 1 `dry` is taken. Skipped otherwise |
 | a clear noon is taken | with `ENVIRONMENT`: 0 oktas, fog visual range 100 km, dry, 12:00 on day 172 is taken. Skipped otherwise |
 | (autopilot) | with `AUTOPILOT`: skipped; it needs a road, and the scenario suite checks it |
 | the same world again: the same episode, time going on | the same `LoadWorld` again answers the first load's `episode_id` and a `sim_time_ns` no less than the last step's |

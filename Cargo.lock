@@ -402,6 +402,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "scensim_core"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "libc",
+ "prost",
+ "prost-build",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tracing",
+ "zmq",
+]
+
+[[package]]
+name = "scensim_world_check"
+version = "0.1.0"
+dependencies = [
+ "scensim_core",
+ "serde",
+ "serde_yaml",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -477,31 +502,6 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
-
-[[package]]
-name = "swb_core"
-version = "0.1.0"
-dependencies = [
- "eyre",
- "libc",
- "prost",
- "prost-build",
- "roxmltree",
- "serde",
- "serde_json",
- "serde_yaml",
- "tracing",
- "zmq",
-]
-
-[[package]]
-name = "swb_world_check"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_yaml",
- "swb_core",
-]
 
 [[package]]
 name = "syn"
@@ -720,19 +720,3 @@ dependencies = [
  "system-deps",
  "zeromq-src",
 ]
-
-[[patch.unused]]
-name = "builtin_interfaces"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "rcl_interfaces"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "rmw_dds_common"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "swb_interfaces"
-version = "0.0.0"

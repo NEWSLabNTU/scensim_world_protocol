@@ -1,0 +1,15 @@
+[package]
+name = "scensim_world_check"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Probe or conformance-check any world server over the world protocol"
+
+[[bin]]
+name = "scensim_world_check"
+path = "src/main.rs"
+
+[dependencies]
+scensim_core = { path = "../scensim_core" }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

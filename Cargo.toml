@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["swb_core", "swb_world_check"]
+members = ["scensim_core", "scensim_world_check"]
 
 [profile.dev-release]
 inherits = "release"

@@ -3,7 +3,7 @@
 How the scenario bridge (scenario-world-bridge's `RemoteBackend`) drives a simulator's
 **world server**. The bridge knows no simulator: everything it asks of one goes over this
 protocol, and a simulator becomes a backend by serving it. The definition is
-[`proto/swb_world.proto`](../proto/swb_world.proto) (package `swb_world`); this page says
+[`proto/scensim_world.proto`](../proto/scensim_world.proto) (package `scensim_world`); this page says
 what the messages mean together. How to write a server, and the conformance check that
 says one is done: [world-server.md](world-server.md).
 
@@ -23,8 +23,8 @@ says one is done: [world-server.md](world-server.md).
 - An undecodable request, or one with no request set, is refused (`ok: false`), not dropped.
 
 `PROTOCOL_VERSION` is **4**. It is defined in three places that must agree:
-`swb_core::world_client::PROTOCOL_VERSION` (used by the bridge, the Rust shell and
-`swb_world_check`) and `swb_world_server/protocol.py`'s `PROTOCOL_VERSION`. Bump it on any
+`scensim_core::world_client::PROTOCOL_VERSION` (used by the bridge, the Rust shell and
+`scensim_world_check`) and `scensim_world_server/protocol.py`'s `PROTOCOL_VERSION`. Bump it on any
 change a peer of the other version would misread. A field added for a capability the bridge
 only uses when the server declares it needs no bump.
 
@@ -44,7 +44,7 @@ only uses when the server declares it needs no bump.
   pitch puts the nose **down** and a positive roll the right side down; a car facing up a
   10 deg slope has pitch -10 deg. A server whose simulator keeps another convention
   converts at its own edge (CARLA/UE: pitch positive nose up, so roll stays, pitch and yaw
-  negate; `swb_carla_world`); Isaac's stage is ENU and takes the quaternion as it is. The
+  negate; `scensim_carla_world`); Isaac's stage is ENU and takes the quaternion as it is. The
   conformance check tests it ("a pose's orientation reads back as posed" and, on a map
   slope, "the ego settles with the road's pitch sign").
 - `Pose.rpy`, when set, is roll, pitch and yaw in radians, authoritative over the quaternion.
@@ -58,7 +58,7 @@ only uses when the server declares it needs no bump.
 A server is driven by one client at a time, its **owner**.
 
 - A `Hello` with `probe: true` is a health check. It is answered, and nothing changes: no
-  ownership taken, no lease refreshed. `swb_world_check hello` and the bridge's idle checks
+  ownership taken, no lease refreshed. `scensim_world_check hello` and the bridge's idle checks
   are probes.
 - A `Hello` with `probe: false`:
   - with no owner, makes the sender the owner, and every entity the server still has is
@@ -175,7 +175,7 @@ What the bridge does with the last two, for the ego (roadmap 051):
   values. The box is compared when the server reported one, the wheels when both sides know
   them, and the box's y by size only.
 - **The start check**: it compares `spec_hash` with the vehicle agent's and with the
-  installed catalog entry's (`Property name="swb.spec_hash"`) and refuses the ego when two
+  installed catalog entry's (`Property name="scensim.spec_hash"`) and refuses the ego when two
   differ, naming who loaded which. A part that reports none is left out.
 
 ### Despawn
@@ -257,8 +257,8 @@ The bridge exposes this as ROS services (`/scenario_world_bridge/set_weather`,
 
 SSv2's `UpdateEnvironment` road condition: the whole road state from now on, replacing the
 last one. `friction_scale_factor` scales every surface's friction; `wetness` is one of
-OpenSCENARIO's levels (empty: dry); `properties` holds only `swb.` properties, where
-`swb.zone.<id>.<field>` sets a field of a zone of the map's `surfaces.yaml`. A server refuses
+OpenSCENARIO's levels (empty: dry); `properties` holds only `scensim.` properties, where
+`scensim.zone.<id>.<field>` sets a field of a zone of the map's `surfaces.yaml`. A server refuses
 a property it does not know or cannot apply, listing every problem (a zone it does not have
 by its id), and then changes nothing. `LoadWorld` and `Release` go back to the default.
 
@@ -287,8 +287,8 @@ nanos(s)    = round(s * 1e9), half away from zero
 `elapsed_seconds` is the simulator's time into its episode. `BASE_NS` keeps ROS time far from
 0, which ROS reads as "no clock yet", and from the small values for which `now() - duration`
 goes negative. The rounding is Rust's `f64::round`, not Python's `round()` (half to even,
-1 ns apart on about 1.4 % of CARLA frames). Implementations: `swb_core::sim_time` (`BASE_NS`,
-`nanos`, `sim_ns`) and `swb_world_server.protocol` (`BASE_NS`, `nanos`, `sim_ns`).
+1 ns apart on about 1.4 % of CARLA frames). Implementations: `scensim_core::sim_time` (`BASE_NS`,
+`nanos`, `sim_ns`) and `scensim_world_server.protocol` (`BASE_NS`, `nanos`, `sim_ns`).
 Nothing about time is shared, stored or sent beyond the replies: any process computes it from
 the frame it holds.
 
@@ -315,7 +315,7 @@ server's death.
 `proto/` also holds SSv2's `simulation_interface` protos (`simulation_api_schema`,
 `geometry_msgs`, `traffic_simulator_msgs`, `builtin_interfaces`, `autoware_control_msgs`,
 `autoware_vehicle_msgs`, `rosgraph_msgs`, `std_msgs`). They are not part of the world
-protocol on the wire. `swb_core`'s `SimBackend` seam and its shared world policy are typed in
+protocol on the wire. `scensim_core`'s `SimBackend` seam and its shared world policy are typed in
 them. They must be byte-identical to the SSv2 fork's (`scenario_simulator_v2`,
 `simulation/simulation_interface/proto/`): a field added to one copy and not the other
 decodes as silence, not as an error. scenario-world-bridge's `just test` checks this
