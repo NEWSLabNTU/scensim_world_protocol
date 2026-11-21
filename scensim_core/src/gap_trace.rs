@@ -79,6 +79,11 @@ pub enum Record {
         /// `sim_time_ns`). Absent when unknown.
         #[serde(skip_serializing_if = "Option::is_none")]
         wall_ns: Option<i64>,
+        /// SSv2's `npc_logic_started` in the entity status that staged this frame: the
+        /// first frame with it true counts the frames before `startNpcLogic` (S, scensim 092
+        /// K2.4: a batch replay's `start_frames`). Absent when unknown.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        npc_logic_started: Option<bool>,
         entities: BTreeMap<String, EntityState>,
     },
     Contact {
@@ -252,6 +257,7 @@ struct Staged {
     frame: u64,
     sim_time: f64,
     entities: Vec<StagedEntity>,
+    npc_logic_started: Option<bool>,
 }
 
 /// What the writer thread is told.
@@ -406,7 +412,21 @@ impl GapTrace {
             frame,
             sim_time,
             entities,
+            npc_logic_started: None,
         });
+    }
+
+    /// SSv2's `npc_logic_started` for the staged frame `frame` (from the `UpdateEntityStatus`
+    /// that staged it).
+    pub fn npc_logic(&mut self, frame: u64, started: bool) {
+        if let Some(staged) = self
+            .episode
+            .as_mut()
+            .and_then(|ep| ep.staged.as_mut())
+            .filter(|s| s.frame == frame)
+        {
+            staged.npc_logic_started = Some(started);
+        }
     }
 
     /// SSv2's simulation time for frame `frame`, from its `UpdateFrame`.
@@ -491,6 +511,7 @@ impl GapTrace {
             sim_time_ns,
             sim_frame,
             wall_ns,
+            npc_logic_started: staged.npc_logic_started,
             entities,
         };
         if self.try_frame(record.to_line()) {
@@ -916,12 +937,14 @@ mod tests {
             sim_time_ns: Some(1_000_350_000_000),
             sim_frame: None,
             wall_ns: Some(351_000_000),
+            npc_logic_started: Some(true),
             entities,
         };
         assert_eq!(
             parse(&r),
             json!({"type": "frame", "frame": 7, "sim_time": 0.35,
-                "sim_time_ns": 1_000_350_000_000_i64, "wall_ns": 351_000_000_i64, "entities": {
+                "sim_time_ns": 1_000_350_000_000_i64, "wall_ns": 351_000_000_i64,
+                "npc_logic_started": true, "entities": {
                 "ego": {"ssv2": [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
                         "sim_pose": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0],
                         "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured"},
@@ -1032,6 +1055,8 @@ mod tests {
             ],
         );
         t.frame_time(2, 0.10);
+        t.npc_logic(2, true);
+        t.npc_logic(9, false); // not the staged frame: ignored
         t.contacts(vec![
             (hit(2, Some(11)), Some("npc".into())),
             (hit(2, None), None),
@@ -1069,8 +1094,14 @@ mod tests {
         assert!(v[3].get("sim_frame").is_none());
         assert_eq!(v[7]["sim_frame"], 5021);
         // The bridge's monotonic clock, from the episode's start, never going back (092 K4).
-        let (w1, w2) = (v[3]["wall_ns"].as_i64().unwrap(), v[7]["wall_ns"].as_i64().unwrap());
+        let (w1, w2) = (
+            v[3]["wall_ns"].as_i64().unwrap(),
+            v[7]["wall_ns"].as_i64().unwrap(),
+        );
         assert!(0 <= w1 && w1 <= w2, "{w1} {w2}");
+        // npc_logic_started as the staging status said (092 K2.4), and no key when not told.
+        assert!(v[3].get("npc_logic_started").is_none());
+        assert_eq!(v[7]["npc_logic_started"], true);
         assert_eq!(v[4]["other_kind"], "vehicle");
         assert_eq!(v[4]["ego_id"], 10);
         assert_eq!(v[5]["other_kind"], "static");
