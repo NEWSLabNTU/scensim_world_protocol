@@ -74,6 +74,11 @@ pub enum Record {
         /// against the SSv2 frame it is labelled with. Absent when unknown.
         #[serde(skip_serializing_if = "Option::is_none")]
         sim_frame: Option<u64>,
+        /// The bridge's monotonic clock when the world's state for this frame arrived, ns
+        /// since the episode began (scensim 092 K4, the paced clock: its lag against
+        /// `sim_time_ns`). Absent when unknown.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wall_ns: Option<i64>,
         entities: BTreeMap<String, EntityState>,
     },
     Contact {
@@ -274,6 +279,8 @@ struct Episode {
     staged: Option<Staged>,
     /// The next entity slot.
     next_index: u32,
+    /// When the episode began, on the monotonic clock: frames' `wall_ns` count from it.
+    t0: std::time::Instant,
 }
 
 /// The recorder as the coordinator holds it.
@@ -360,6 +367,7 @@ impl GapTrace {
             seen: HashSet::new(),
             staged: None,
             next_index: 0,
+            t0: std::time::Instant::now(),
         });
         self.warned_closed = false;
         self.push_line(Record::Episode {
@@ -476,11 +484,13 @@ impl GapTrace {
                 },
             );
         }
+        let wall_ns = i64::try_from(ep.t0.elapsed().as_nanos()).ok();
         let record = Record::Frame {
             frame: staged.frame,
             sim_time: staged.sim_time,
             sim_time_ns,
             sim_frame,
+            wall_ns,
             entities,
         };
         if self.try_frame(record.to_line()) {
@@ -905,12 +915,13 @@ mod tests {
             sim_time: 0.35,
             sim_time_ns: Some(1_000_350_000_000),
             sim_frame: None,
+            wall_ns: Some(351_000_000),
             entities,
         };
         assert_eq!(
             parse(&r),
             json!({"type": "frame", "frame": 7, "sim_time": 0.35,
-                "sim_time_ns": 1_000_350_000_000_i64, "entities": {
+                "sim_time_ns": 1_000_350_000_000_i64, "wall_ns": 351_000_000_i64, "entities": {
                 "ego": {"ssv2": [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
                         "sim_pose": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0],
                         "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured"},
@@ -1057,6 +1068,9 @@ mod tests {
         // The snapshot's simulator frame when known (032 N2), and no key otherwise.
         assert!(v[3].get("sim_frame").is_none());
         assert_eq!(v[7]["sim_frame"], 5021);
+        // The bridge's monotonic clock, from the episode's start, never going back (092 K4).
+        let (w1, w2) = (v[3]["wall_ns"].as_i64().unwrap(), v[7]["wall_ns"].as_i64().unwrap());
+        assert!(0 <= w1 && w1 <= w2, "{w1} {w2}");
         assert_eq!(v[4]["other_kind"], "vehicle");
         assert_eq!(v[4]["ego_id"], 10);
         assert_eq!(v[5]["other_kind"], "static");
