@@ -326,10 +326,13 @@ class WorldServer:
         now_ns = pb.sim_ns(self.sim_time)
         reply = pb.StepReply(sim_time=now_ns / 1e9, frame=self.frame, tick_seconds=elapsed,
                              sim_time_ns=now_ns, episode_id=self.episode_id)
-        for handle, pose, twist in states:
+        for handle, pose, twist, *rest in states:
             state = reply.states.add(handle=handle, pose=pb.make_pose(*pose))
             if twist is not None:
                 state.twist.CopyFrom(pb.make_twist(*twist))
+            command = rest[0] if rest else None
+            if command is not None:      # an ego's taken command (World.step's docstring)
+                state.command.CopyFrom(pb.TakenCommand(**command))
         for handle, other, path, impulse in contacts:
             reply.contacts.add(handle=handle, other=other, other_path=path, impulse=impulse)
         return pb.Reply(ok=True, step=reply)

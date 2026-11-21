@@ -33,6 +33,7 @@ class FakeWorld(World):
         self.bodies = {}
         self.loads = []
         self.steps = []
+        self.command = None   # what an EGO ran this step (TakenCommand fields), or None
         self.resets = []
 
     @property
@@ -85,6 +86,7 @@ class FakeWorld(World):
             elif d.pose is not None:
                 b["pose"] = d.pose
         states = [(h, b["pose"], b["twist"] if b["motion"] == "TRACKED" else None)
+                  + ((self.command,) if b["kind"] == "EGO" else ())
                   for h, b in self.bodies.items()]
         contacts = []
         for h, b in self.bodies.items():
@@ -187,6 +189,16 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(set(self.world.steps[-1][0]), {npc})
         states = {s.handle: pb.pose_tuple(s.pose) for s in r.step.states}
         self.assertEqual(states[npc][0], (-0.5, 0.0, 0.0))
+        # no command run yet: the ego's state has none (an NPC never does)
+        self.assertFalse(any(s.HasField("command") for s in r.step.states))
+        self.world.command = {"stamp_ns": 1000_000_000_000, "acceleration": 1.0,
+                              "velocity": 3.0, "tire_angle": 0.1, "gear": 2, "arrived": 2}
+        r = step(self.server)
+        c = {s.handle: s for s in r.step.states}
+        self.assertTrue(c[ego].HasField("command") and not c[npc].HasField("command"))
+        self.assertEqual((c[ego].command.stamp_ns, c[ego].command.arrived), (1000_000_000_000, 2))
+        self.assertAlmostEqual(c[ego].command.tire_angle, 0.1)
+        self.world.command = None
         self.assertEqual(len(r.step.contacts), 1)
         c = r.step.contacts[0]
         self.assertEqual((c.handle, c.other, c.impulse), (ego, npc, 2.5))

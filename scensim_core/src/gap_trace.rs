@@ -224,8 +224,25 @@ pub struct EntityState {
     /// `measured` (the world server sent the velocity) or `derived` (the bridge differenced
     /// two poses); null with `sim_pose`.
     pub velocity_source: Option<&'static str>,
+    /// The command an ego's vehicle ran this frame, where the world server runs its vehicle
+    /// interface (`TakenCommand` on the wire); absent otherwise (scensim roadmap 092 K2.4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<TakenCommand>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<&'static str>,
+}
+
+/// The vehicle command an ego ran in a frame: the latest its vehicle interface took by the
+/// frame's start. `stamp_ns` is the command's header stamp; `arrived`, how many arrived by
+/// then (above 1: the others were superseded unrun; 0: an older one runs again).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TakenCommand {
+    pub stamp_ns: i64,
+    pub acceleration: f64,
+    pub velocity: f64,
+    pub tire_angle: f64,
+    pub gear: i32,
+    pub arrived: u32,
 }
 
 /// What the simulator says about one body after a step, map frame.
@@ -237,6 +254,8 @@ pub struct SimState {
     pub angular_velocity: [f64; 3],
     /// Whether the world server measured the velocity (else the bridge derived it).
     pub measured: bool,
+    /// The ego's command the world server reports it ran, if any.
+    pub command: Option<TakenCommand>,
 }
 
 /// One entity of a staged frame: what SSv2 had, before CARLA's half is known.
@@ -500,6 +519,7 @@ impl GapTrace {
                     velocity: sim.map(|c| c.velocity),
                     angular_velocity: sim.map(|c| c.angular_velocity),
                     velocity_source: sim.map(|c| if c.measured { "measured" } else { "derived" }),
+                    command: sim.and_then(|c| c.command),
                     flags,
                 },
             );
@@ -917,6 +937,14 @@ mod tests {
                 velocity: Some([4.0, 0.0, 0.0]),
                 angular_velocity: Some([0.0, 0.0, 0.2]),
                 velocity_source: Some("measured"),
+                command: Some(TakenCommand {
+                    stamp_ns: 1_000_300_000_000,
+                    acceleration: 1.0,
+                    velocity: 3.0,
+                    tire_angle: 0.0,
+                    gear: 2,
+                    arrived: 2,
+                }),
                 flags: vec![],
             },
         );
@@ -928,6 +956,7 @@ mod tests {
                 velocity: None,
                 angular_velocity: None,
                 velocity_source: None,
+                command: None,
                 flags: vec!["spawn", "contact_hold"],
             },
         );
@@ -947,7 +976,10 @@ mod tests {
                 "npc_logic_started": true, "entities": {
                 "ego": {"ssv2": [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
                         "sim_pose": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0],
-                        "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured"},
+                        "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured",
+                        "command": {"stamp_ns": 1_000_300_000_000_i64, "acceleration": 1.0,
+                                    "velocity": 3.0, "tire_angle": 0.0, "gear": 2,
+                                    "arrived": 2}},
                 "npc": {"ssv2": [5.0, 2.0, 0.0, 0.0, 0.0, 0.0], "sim_pose": null,
                         "velocity": null, "angular_velocity": null, "velocity_source": null,
                         "flags": ["spawn", "contact_hold"]}}})
@@ -1015,6 +1047,7 @@ mod tests {
             velocity: [vx, 0.0, 0.0],
             angular_velocity: [0.0, 0.0, 0.0],
             measured,
+            command: None,
         }
     }
 

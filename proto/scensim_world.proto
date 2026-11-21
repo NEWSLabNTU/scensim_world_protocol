@@ -422,6 +422,26 @@ message EntityState {
   // The body's velocity after the step, world frame: a tracked body's and an ego vehicle's;
   // unset for kinematic bodies on a server that does not measure them.
   Twist twist = 3;
+  // An ego's vehicle command that ran in this step, on a server that drives the ego's
+  // vehicle interface itself (Isaac); unset elsewhere and before the first command.
+  TakenCommand command = 4;
+}
+
+// The command an ego's vehicle ran in a step (scensim roadmap 092 K2.4): its own vehicle
+// interface takes the commands that arrived by the step's start, and the latest wins, as on a
+// car. Additive (no protocol bump: a peer of the other version ignores it).
+message TakenCommand {
+  // The command's header stamp, ns (the sender's clock: sim time plus BASE_NS).
+  int64 stamp_ns = 1;
+  // Its values: longitudinal acceleration (m/s^2) and velocity (m/s), tire angle (rad).
+  double acceleration = 2;
+  double velocity = 3;
+  double tire_angle = 4;
+  // The gear it runs in (Autoware's GearReport values).
+  int32 gear = 5;
+  // Commands that arrived by this step's start, the one run included: above 1, the others
+  // were superseded unrun; 0, the vehicle runs an older one again.
+  uint32 arrived = 6;
 }
 
 // A reporting body (the ego, a tracked body) touching another at any substep of the step,

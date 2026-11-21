@@ -70,8 +70,10 @@ class World:
 
     def step(self, drives, substeps, dt, render, sim_time):
         """Apply ``{handle: Drive}`` (``sim_time`` is the clock at the step's start), run
-        `substeps` physics steps of `dt`, and return ``[(handle, pose, twist)]`` for every
-        entity (``twist`` None where the simulator has none) and ``[(handle, other,
+        `substeps` physics steps of `dt`, and return ``[(handle, pose, twist[, command])]`` for
+        every entity (``twist`` None where the simulator has none; ``command``, for an ego whose
+        vehicle interface the server runs, the dict of `TakenCommand`'s fields it ran, or None)
+        and ``[(handle, other,
         other_path, impulse)]`` for the contacts (``other`` 0: the environment)."""
         raise NotImplementedError
 
