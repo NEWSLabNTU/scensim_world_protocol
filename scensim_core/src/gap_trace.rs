@@ -1,5 +1,5 @@
-//! The gap trace: SSv2's world and CARLA's, frame by frame, for the offline oracle
-//! (roadmap 024).
+//! The gap trace: SSv2's world and the simulator's, frame by frame, for the offline oracle
+//! (roadmap 024) and as the run's truth file (roadmap 092 S4, `docs/design/truth-stream.md`).
 //!
 //! One JSON Lines file per `Initialize`, `<gap_trace_dir>/<UTC time>_<episode>.jsonl`, in
 //! the format of `docs/design/gap-campaign.md`, appendix "Gap trace format" (schema 1). The
@@ -35,8 +35,12 @@ use serde::Serialize;
 
 use crate::contact_report::{self, RawCollision};
 
-/// The trace format version (`docs/design/gap-campaign.md`, appendix).
-pub const SCHEMA: u32 = 1;
+/// The trace format version (`docs/design/truth-stream.md`). Schema 2 names the simulator's
+/// values neutrally (`sim_pose`, `sim_frame`, `sim_id`, `asset`, `asset_box`) where schema 1
+/// named them after CARLA, and adds the entity's `index`, `role` and `subtype`, `sim_time_ns`,
+/// `angular_velocity`, `velocity_source`, the episode's `map` and `step_time`, and `signal`
+/// lines. Readers read each file by its schema.
+pub const SCHEMA: u32 = 2;
 
 /// Lines the writer channel holds: about 25 s of frames at 20 Hz with a few entities, so
 /// only a disk stalled for that long drops a frame.
@@ -54,21 +58,27 @@ pub enum Record {
         episode: u64,
         start_unix: f64,
         npc_motion: &'static str,
+        map: String,
+        step_time: f64,
     },
     Entity(EntityHeader),
     Frame {
         frame: u64,
         sim_time: f64,
-        /// The CARLA frame of the snapshot CARLA's half was read from: the frame's last tick
-        /// (roadmap 032 N2), so a contact's `carla_frame` can be checked against the SSv2
-        /// frame it is labelled with. Absent when unknown; older traces have none.
+        /// The simulation time of the snapshot, ns (`StepReply.sim_time_ns`); absent when
+        /// unknown.
         #[serde(skip_serializing_if = "Option::is_none")]
-        carla_frame: Option<u64>,
+        sim_time_ns: Option<i64>,
+        /// The simulator frame of the snapshot the simulator's half was read from: the
+        /// frame's last tick (roadmap 032 N2), so a contact's `sim_frame` can be checked
+        /// against the SSv2 frame it is labelled with. Absent when unknown.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sim_frame: Option<u64>,
         entities: BTreeMap<String, EntityState>,
     },
     Contact {
         frame: u64,
-        carla_frame: u64,
+        sim_frame: u64,
         sim_time: f64,
         ego_id: u32,
         /// The tracked NPC whose own sensor saw the contact (roadmap 032 step 5); absent for
@@ -80,6 +90,13 @@ pub enum Record {
         other_type: String,
         other_kind: &'static str,
         impulse: f64,
+    },
+    /// A signal's colour changed (the bridge set it): an event, not repeated per frame.
+    Signal {
+        frame: u64,
+        sim_time_ns: i64,
+        opendrive_id: String,
+        colour: String,
     },
     End {
         frame: u64,
@@ -130,11 +147,41 @@ pub struct DeclaredBox {
     pub dimensions: [f64; 3],
 }
 
-/// CARLA's box in the actor's own frame, ROS-handed (y left).
+/// The simulator's box in the body's own frame, ROS-handed (y left).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct BlueprintBox {
+pub struct AssetBox {
     pub location: [f64; 3],
     pub extent: [f64; 3],
+}
+
+/// How an entity is driven, the `entity` record's `role`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The ego, driven by its stack.
+    Ego,
+    /// Posed or tracked from SSv2's scenario.
+    Scenario,
+    /// The simulator's own autopilot.
+    Autopilot,
+    /// A behaviour agent over the relay.
+    Agent,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Ego => "ego",
+            Role::Scenario => "scenario",
+            Role::Autopilot => "autopilot",
+            Role::Agent => "agent",
+        }
+    }
+}
+
+impl Serialize for Role {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
 }
 
 /// The `entity` record, written once per spawn.
@@ -142,33 +189,51 @@ pub struct BlueprintBox {
 pub struct EntityHeader {
     pub frame: u64,
     pub name: String,
+    /// The entity's slot in the episode: set by the recorder at each header (what the caller
+    /// gives is replaced), never reused; a respawn under the same name gets a new one.
+    pub index: u32,
+    pub role: Role,
     pub kind: Kind,
+    /// SSv2's subtype (car, truck, pedestrian, ...), lowercase.
+    pub subtype: String,
     pub declared: DeclaredBox,
     /// `[x, y, yaw]`, the bridge's `OriginOffset`.
     pub origin_offset: [f64; 3],
-    pub actor_id: u32,
-    pub blueprint: String,
-    pub blueprint_box: Option<BlueprintBox>,
+    pub sim_id: u32,
+    pub asset: String,
+    pub asset_box: Option<AssetBox>,
 }
 
 /// One entity in one frame line.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EntityState {
     pub ssv2: Pose6,
-    pub carla: Option<Pose6>,
+    pub sim_pose: Option<Pose6>,
     pub velocity: Option<[f64; 3]>,
+    pub angular_velocity: Option<[f64; 3]>,
+    /// `measured` (the world server sent the velocity) or `derived` (the bridge differenced
+    /// two poses); null with `sim_pose`.
+    pub velocity_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<&'static str>,
 }
 
-/// What CARLA's snapshot says about one actor: transform and velocity, map frame.
-pub type CarlaState = (Pose6, [f64; 3]);
+/// What the simulator says about one body after a step, map frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SimState {
+    pub pose: Pose6,
+    /// World frame, m/s and rad/s.
+    pub velocity: [f64; 3],
+    pub angular_velocity: [f64; 3],
+    /// Whether the world server measured the velocity (else the bridge derived it).
+    pub measured: bool,
+}
 
 /// One entity of a staged frame: what SSv2 had, before CARLA's half is known.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StagedEntity {
     pub name: String,
-    pub actor_id: u32,
+    pub sim_id: u32,
     pub ssv2: Pose6,
     /// A tracked NPC within `CONTACT_HOLD_FRAMES` of an ego contact (roadmap 023).
     pub contact_hold: bool,
@@ -207,6 +272,8 @@ struct Episode {
     /// Entities that have been in a frame line since their header: the rest get `spawn`.
     seen: HashSet<String>,
     staged: Option<Staged>,
+    /// The next entity slot.
+    next_index: u32,
 }
 
 /// The recorder as the coordinator holds it.
@@ -261,7 +328,14 @@ impl GapTrace {
     }
 
     /// A new `Initialize`: end the previous episode if still open, open the next file.
-    pub fn begin_episode(&mut self, episode: u64, npc_motion: &'static str, start_unix: f64) {
+    pub fn begin_episode(
+        &mut self,
+        episode: u64,
+        npc_motion: &'static str,
+        start_unix: f64,
+        map: &str,
+        step_time: f64,
+    ) {
         let Some(dir) = self.dir.clone() else {
             return;
         };
@@ -285,6 +359,7 @@ impl GapTrace {
             kinds: HashMap::new(),
             seen: HashSet::new(),
             staged: None,
+            next_index: 0,
         });
         self.warned_closed = false;
         self.push_line(Record::Episode {
@@ -292,16 +367,20 @@ impl GapTrace {
             episode,
             start_unix,
             npc_motion,
+            map: map.to_string(),
+            step_time,
         });
     }
 
     /// An entity spawned. A respawn under the same name replaces the earlier header.
-    pub fn entity(&mut self, header: EntityHeader) {
+    pub fn entity(&mut self, mut header: EntityHeader) {
         let Some(ep) = self.open_episode() else {
             return;
         };
+        header.index = ep.next_index;
+        ep.next_index += 1;
         if header.kind == Kind::Ego {
-            ep.ego_id = Some(header.actor_id);
+            ep.ego_id = Some(header.sim_id);
         }
         ep.kinds.insert(header.name.clone(), header.kind);
         ep.seen.remove(&header.name);
@@ -347,19 +426,25 @@ impl GapTrace {
             .is_some_and(|s| s.frame <= now)
     }
 
-    /// Write the staged frame if it is due by `now`, with CARLA's state from `carla_of`
-    /// (`None`: the actor is not in the snapshot).
-    pub fn emit_staged<F>(&mut self, now: u64, carla_of: F)
+    /// Write the staged frame if it is due by `now`, with the simulator's state from
+    /// `sim_of` (`None`: the body is not in the snapshot).
+    pub fn emit_staged<F>(&mut self, now: u64, sim_of: F)
     where
-        F: FnMut(u32) -> Option<CarlaState>,
+        F: FnMut(u32) -> Option<SimState>,
     {
-        self.emit_staged_at(now, None, carla_of);
+        self.emit_staged_at(now, None, None, sim_of);
     }
 
-    /// [`GapTrace::emit_staged`] from the snapshot of CARLA frame `carla_frame`.
-    pub fn emit_staged_at<F>(&mut self, now: u64, carla_frame: Option<u64>, mut carla_of: F)
-    where
-        F: FnMut(u32) -> Option<CarlaState>,
+    /// [`GapTrace::emit_staged`] from the snapshot of simulator frame `sim_frame`, taken at
+    /// `sim_time_ns`.
+    pub fn emit_staged_at<F>(
+        &mut self,
+        now: u64,
+        sim_frame: Option<u64>,
+        sim_time_ns: Option<i64>,
+        mut sim_of: F,
+    ) where
+        F: FnMut(u32) -> Option<SimState>,
     {
         if !self.staged_due(now) {
             return;
@@ -368,7 +453,7 @@ impl GapTrace {
         let staged = ep.staged.take().expect("staged_due checked it");
         let mut entities = BTreeMap::new();
         for e in staged.entities {
-            let carla = carla_of(e.actor_id);
+            let sim = sim_of(e.sim_id);
             let mut flags = Vec::new();
             if ep.seen.insert(e.name.clone()) {
                 flags.push("spawn");
@@ -383,8 +468,10 @@ impl GapTrace {
                 e.name,
                 EntityState {
                     ssv2: e.ssv2,
-                    carla: carla.map(|c| c.0),
-                    velocity: carla.map(|c| c.1),
+                    sim_pose: sim.map(|c| c.pose),
+                    velocity: sim.map(|c| c.velocity),
+                    angular_velocity: sim.map(|c| c.angular_velocity),
+                    velocity_source: sim.map(|c| if c.measured { "measured" } else { "derived" }),
                     flags,
                 },
             );
@@ -392,7 +479,8 @@ impl GapTrace {
         let record = Record::Frame {
             frame: staged.frame,
             sim_time: staged.sim_time,
-            carla_frame,
+            sim_time_ns,
+            sim_frame,
             entities,
         };
         if self.try_frame(record.to_line()) {
@@ -435,7 +523,7 @@ impl GapTrace {
                 };
                 Record::Contact {
                     frame: event.ssv2_frame,
-                    carla_frame: event.carla_frame,
+                    sim_frame: event.carla_frame,
                     sim_time: event.sim_time.max(0.0),
                     ego_id,
                     subject: event.subject,
@@ -450,6 +538,19 @@ impl GapTrace {
         for r in records {
             self.push_line(r);
         }
+    }
+
+    /// A signal changed colour at SSv2 frame `frame` (the bridge set it).
+    pub fn signal(&mut self, frame: u64, sim_time_ns: i64, opendrive_id: &str, colour: &str) {
+        if self.open_episode().is_none() {
+            return;
+        }
+        self.push_line(Record::Signal {
+            frame,
+            sim_time_ns,
+            opendrive_id: opendrive_id.to_string(),
+            colour: colour.to_string(),
+        });
     }
 
     /// CARLA restarted: contacts after this point were not seen.
@@ -662,19 +763,26 @@ mod tests {
         serde_json::from_str(&r.to_line()).expect("valid JSON")
     }
 
-    fn header(name: &str, kind: Kind, actor_id: u32) -> EntityHeader {
+    fn header(name: &str, kind: Kind, sim_id: u32) -> EntityHeader {
         EntityHeader {
             frame: 0,
             name: name.into(),
+            index: 99, // the recorder sets it
+            role: if kind == Kind::Ego {
+                Role::Ego
+            } else {
+                Role::Scenario
+            },
             kind,
+            subtype: "car".into(),
             declared: DeclaredBox {
                 center: [1.5, 0.0, 0.75],
                 dimensions: [4.5, 2.0, 1.5],
             },
             origin_offset: [1.5, 0.0, 0.0],
-            actor_id,
-            blueprint: "vehicle.tesla.model3".into(),
-            blueprint_box: Some(BlueprintBox {
+            sim_id,
+            asset: "vehicle.tesla.model3".into(),
+            asset_box: Some(AssetBox {
                 location: [0.0, 0.0, 0.72],
                 extent: [2.35, 1.05, 0.72],
             }),
@@ -703,7 +811,7 @@ mod tests {
     fn an_npc_sensor_contact_names_its_subject() {
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
         let mut t = GapTrace::with_channel(PathBuf::from("/nonexistent"), tx);
-        t.begin_episode(1, "tracked", 0.0);
+        t.begin_episode(1, "tracked", 0.0, "Town01", 0.05);
         t.entity(header("ego", Kind::Ego, 10));
         t.entity(header("npc_05", Kind::Vehicle, 11));
         t.entity(header("npc_09", Kind::Vehicle, 12));
@@ -735,11 +843,14 @@ mod tests {
             episode: 3,
             start_unix: 1_760_000_000.25,
             npc_motion: "tracked",
+            map: "Town01".into(),
+            step_time: 0.05,
         };
         assert_eq!(
             parse(&r),
-            json!({"type": "episode", "schema": 1, "episode": 3,
-                   "start_unix": 1_760_000_000.25, "npc_motion": "tracked"})
+            json!({"type": "episode", "schema": 2, "episode": 3,
+                   "start_unix": 1_760_000_000.25, "npc_motion": "tracked",
+                   "map": "Town01", "step_time": 0.05})
         );
     }
 
@@ -748,17 +859,20 @@ mod tests {
         let mut h = header("truck", Kind::Vehicle, 212);
         assert_eq!(
             parse(&Record::Entity(h.clone())),
-            json!({"type": "entity", "frame": 0, "name": "truck", "kind": "vehicle",
+            json!({"type": "entity", "frame": 0, "name": "truck", "index": 99,
+                   "role": "scenario", "kind": "vehicle", "subtype": "car",
                    "declared": {"center": [1.5, 0.0, 0.75], "dimensions": [4.5, 2.0, 1.5]},
-                   "origin_offset": [1.5, 0.0, 0.0], "actor_id": 212,
-                   "blueprint": "vehicle.tesla.model3",
-                   "blueprint_box": {"location": [0.0, 0.0, 0.72], "extent": [2.35, 1.05, 0.72]}})
+                   "origin_offset": [1.5, 0.0, 0.0], "sim_id": 212,
+                   "asset": "vehicle.tesla.model3",
+                   "asset_box": {"location": [0.0, 0.0, 0.72], "extent": [2.35, 1.05, 0.72]}})
         );
         h.kind = Kind::MiscObject;
-        h.blueprint_box = None;
+        h.role = Role::Agent;
+        h.asset_box = None;
         let v = parse(&Record::Entity(h));
         assert_eq!(v["kind"], "misc_object");
-        assert_eq!(v["blueprint_box"], Value::Null);
+        assert_eq!(v["role"], "agent");
+        assert_eq!(v["asset_box"], Value::Null);
     }
 
     #[test]
@@ -768,8 +882,10 @@ mod tests {
             "ego".to_string(),
             EntityState {
                 ssv2: [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
-                carla: Some([1.1, 2.0, 0.03, 0.0, 0.0, 0.5]),
+                sim_pose: Some([1.1, 2.0, 0.03, 0.0, 0.0, 0.5]),
                 velocity: Some([4.0, 0.0, 0.0]),
+                angular_velocity: Some([0.0, 0.0, 0.2]),
+                velocity_source: Some("measured"),
                 flags: vec![],
             },
         );
@@ -777,24 +893,30 @@ mod tests {
             "npc".to_string(),
             EntityState {
                 ssv2: [5.0, 2.0, 0.0, 0.0, 0.0, 0.0],
-                carla: None,
+                sim_pose: None,
                 velocity: None,
+                angular_velocity: None,
+                velocity_source: None,
                 flags: vec!["spawn", "contact_hold"],
             },
         );
         let r = Record::Frame {
             frame: 7,
             sim_time: 0.35,
-            carla_frame: None,
+            sim_time_ns: Some(1_000_350_000_000),
+            sim_frame: None,
             entities,
         };
         assert_eq!(
             parse(&r),
-            json!({"type": "frame", "frame": 7, "sim_time": 0.35, "entities": {
+            json!({"type": "frame", "frame": 7, "sim_time": 0.35,
+                "sim_time_ns": 1_000_350_000_000_i64, "entities": {
                 "ego": {"ssv2": [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
-                        "carla": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0]},
-                "npc": {"ssv2": [5.0, 2.0, 0.0, 0.0, 0.0, 0.0], "carla": null,
-                        "velocity": null, "flags": ["spawn", "contact_hold"]}}})
+                        "sim_pose": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0],
+                        "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured"},
+                "npc": {"ssv2": [5.0, 2.0, 0.0, 0.0, 0.0, 0.0], "sim_pose": null,
+                        "velocity": null, "angular_velocity": null, "velocity_source": null,
+                        "flags": ["spawn", "contact_hold"]}}})
         );
     }
 
@@ -802,7 +924,7 @@ mod tests {
     fn contact_and_end_records() {
         let r = Record::Contact {
             frame: 1,
-            carla_frame: 5021,
+            sim_frame: 5021,
             sim_time: 0.05,
             ego_id: 211,
             other_id: None,
@@ -814,9 +936,20 @@ mod tests {
         };
         assert_eq!(
             parse(&r),
-            json!({"type": "contact", "frame": 1, "carla_frame": 5021, "sim_time": 0.05,
+            json!({"type": "contact", "frame": 1, "sim_frame": 5021, "sim_time": 0.05,
                    "ego_id": 211, "other_id": null, "name": null, "other_type": "static.pole",
                    "other_kind": "static", "impulse": 30.0})
+        );
+        let r = Record::Signal {
+            frame: 4,
+            sim_time_ns: 1_000_200_000_000,
+            opendrive_id: "12".into(),
+            colour: "red".into(),
+        };
+        assert_eq!(
+            parse(&r),
+            json!({"type": "signal", "frame": 4, "sim_time_ns": 1_000_200_000_000_i64,
+                   "opendrive_id": "12", "colour": "red"})
         );
         let r = Record::End {
             frame: 9,
@@ -842,10 +975,19 @@ mod tests {
         out
     }
 
-    fn staged(name: &str, actor_id: u32, x: f64, hold: bool) -> StagedEntity {
+    fn sim(x: f64, vx: f64, measured: bool) -> SimState {
+        SimState {
+            pose: [x, 0.0, 0.0, 0.0, 0.0, 0.0],
+            velocity: [vx, 0.0, 0.0],
+            angular_velocity: [0.0, 0.0, 0.0],
+            measured,
+        }
+    }
+
+    fn staged(name: &str, sim_id: u32, x: f64, hold: bool) -> StagedEntity {
         StagedEntity {
             name: name.into(),
-            actor_id,
+            sim_id,
             ssv2: [x, 0.0, 0.0, 0.0, 0.0, 0.0],
             contact_hold: hold,
             kinematic: false,
@@ -856,7 +998,7 @@ mod tests {
     fn frames_are_paired_one_request_later_flag_spawn_once_and_name_contacts() {
         let (tx, rx) = std::sync::mpsc::sync_channel(100);
         let mut t = GapTrace::with_channel(PathBuf::from("/nonexistent"), tx);
-        t.begin_episode(1, "tracked", 1_760_000_000.0);
+        t.begin_episode(1, "tracked", 1_760_000_000.0, "Town01", 0.05);
         t.entity(header("ego", Kind::Ego, 10));
         t.entity(header("npc", Kind::Vehicle, 11));
         // UpdateEntityStatus 1 stages frame 1; UpdateFrame 1 stamps its time.
@@ -867,9 +1009,7 @@ mod tests {
         t.frame_time(1, 0.05);
         // Not due before its tick.
         t.emit_staged(0, |_| panic!("not due"));
-        t.emit_staged(1, |id| {
-            (id == 10).then_some(([0.1, 0.0, 0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0]))
-        });
+        t.emit_staged(1, |id| (id == 10).then_some(sim(0.1, 1.0, true)));
         t.stage_frame(
             2,
             vec![
@@ -886,7 +1026,10 @@ mod tests {
             (hit(2, None), None),
             (hit(2, Some(99)), None),
         ]);
-        t.emit_staged_at(2, Some(5021), |_| Some(([0.0; 6], [0.0; 3])));
+        t.emit_staged_at(2, Some(5021), Some(1_000_100_000_000), |_| {
+            Some(sim(0.0, 0.0, false))
+        });
+        t.signal(2, 1_000_100_000_000, "12", "green");
         // Staged but never ticked: replaced, then left at the end.
         t.stage_frame(3, vec![]);
         t.end_episode();
@@ -897,16 +1040,23 @@ mod tests {
             types,
             [
                 "episode", "entity", "entity", "frame", "contact", "contact", "contact", "frame",
-                "end"
+                "signal", "end"
             ]
         );
+        // Slots in header order.
+        assert_eq!(v[1]["index"], 0);
+        assert_eq!(v[2]["index"], 1);
+        assert_eq!(v[3]["entities"]["ego"]["velocity_source"], "measured");
+        assert_eq!(v[7]["entities"]["ego"]["velocity_source"], "derived");
+        assert_eq!(v[7]["sim_time_ns"], 1_000_100_000_000_i64);
+        assert_eq!(v[8]["colour"], "green");
         assert_eq!(v[3]["frame"], 1);
         assert_eq!(v[3]["sim_time"], 0.05);
         assert_eq!(v[3]["entities"]["ego"]["flags"], json!(["spawn"]));
-        assert_eq!(v[3]["entities"]["npc"]["carla"], Value::Null);
-        // The snapshot's CARLA frame when known (032 N2), and no key otherwise.
-        assert!(v[3].get("carla_frame").is_none());
-        assert_eq!(v[7]["carla_frame"], 5021);
+        assert_eq!(v[3]["entities"]["npc"]["sim_pose"], Value::Null);
+        // The snapshot's simulator frame when known (032 N2), and no key otherwise.
+        assert!(v[3].get("sim_frame").is_none());
+        assert_eq!(v[7]["sim_frame"], 5021);
         assert_eq!(v[4]["other_kind"], "vehicle");
         assert_eq!(v[4]["ego_id"], 10);
         assert_eq!(v[5]["other_kind"], "static");
@@ -917,7 +1067,7 @@ mod tests {
             json!(["contact_hold", "kinematic"])
         );
         assert_eq!(
-            v[8],
+            v[9],
             json!({"type": "end", "frame": 2, "sim_time": 0.1, "frames": 2,
                                 "dropped_frames": 0, "complete": true})
         );
@@ -928,7 +1078,7 @@ mod tests {
         // Room for two messages and nobody reading: the ZMQ thread must never wait.
         let (tx, rx) = std::sync::mpsc::sync_channel(2);
         let mut t = GapTrace::with_channel(PathBuf::from("/nonexistent"), tx);
-        t.begin_episode(4, "kinematic", 0.0); // Open + episode: full
+        t.begin_episode(4, "kinematic", 0.0, "Town01", 0.05); // Open + episode: full
         t.entity(header("ego", Kind::Ego, 1)); // backlog
         for f in 1..=3 {
             t.stage_frame(f, vec![staged("ego", 1, 0.0, false)]);
@@ -954,7 +1104,7 @@ mod tests {
     #[test]
     fn off_records_nothing() {
         let mut t = GapTrace::new(None);
-        t.begin_episode(1, "tracked", 0.0);
+        t.begin_episode(1, "tracked", 0.0, "Town01", 0.05);
         t.entity(header("ego", Kind::Ego, 1));
         t.stage_frame(1, vec![staged("ego", 1, 0.0, false)]);
         assert!(!t.recording());
@@ -970,10 +1120,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("scensim-gap-trace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut t = GapTrace::new(Some(dir.clone()));
-        t.begin_episode(2, "tracked", 1_791_683_599.572);
+        t.begin_episode(2, "tracked", 1_791_683_599.572, "field", 0.05);
         t.entity(header("ego", Kind::Ego, 10));
         let mut prop = header("barrier", Kind::MiscObject, 12);
-        prop.blueprint_box = None;
+        prop.asset_box = None;
         t.entity(prop);
         for f in 1..=5u64 {
             t.stage_frame(
@@ -988,9 +1138,12 @@ mod tests {
             );
             t.frame_time(f, 0.05 * f as f64);
             // A CARLA frame on every frame but the first (032 N2: optional).
-            t.emit_staged_at(f, (f > 1).then_some(5000 + f), |id| {
-                (id == 10).then_some(([f as f64 + 0.1, 0.0, 0.0, 0.0, 0.0, 0.0], [2.0, 0.0, 0.0]))
-            });
+            t.emit_staged_at(
+                f,
+                (f > 1).then_some(5000 + f),
+                Some(1_000_000_000_000 + 50_000_000 * f as i64),
+                |id| (id == 10).then_some(sim(f as f64 + 0.1, 2.0, true)),
+            );
         }
         t.contacts(vec![
             (hit(4, None), None),
@@ -1031,15 +1184,20 @@ sys.path.insert(0, sys.argv[1])
 import gap_trace
 t = gap_trace.load_trace(sys.argv[2])
 assert t.episode.episode == 2 and t.episode.npc_motion == "tracked", t.episode
+assert t.episode.schema == 2 and t.episode.map == "field" and t.episode.step_time == 0.05
 assert sorted(t.entities) == ["barrier", "ego"], t.entities
-assert t.entities["barrier"].blueprint_box is None
+assert t.entities["barrier"].asset_box is None
+assert t.entities["ego"].index == 0 and t.entities["barrier"].index == 1
+assert t.entities["ego"].role == "ego" and t.entities["ego"].sim_id == 10
 assert [f.frame for f in t.frames] == [1, 2, 3, 4, 5]
-assert [f.carla_frame for f in t.frames] == [None, 5002, 5003, 5004, 5005]
+assert [f.sim_frame for f in t.frames] == [None, 5002, 5003, 5004, 5005]
+assert t.frames[1].sim_time_ns == 1_000_100_000_000
 assert t.frames[0].entities["ego"].spawn and not t.frames[1].entities["ego"].spawn
 assert t.frames[2].entities["barrier"].contact_hold
 assert t.frames[3].entities["barrier"].kinematic and not t.frames[2].entities["barrier"].kinematic
-assert t.frames[0].entities["barrier"].carla is None
-assert abs(t.frames[4].entities["ego"].carla.x - 5.1) < 1e-9
+assert t.frames[0].entities["barrier"].sim_pose is None
+assert abs(t.frames[4].entities["ego"].sim_pose.x - 5.1) < 1e-9
+assert t.frames[4].entities["ego"].velocity_source == "measured"
 assert len(t.contacts) == 2 and t.contacts[0].other_kind == "static" and t.contacts[0].ego_id == 10
 assert t.contacts[0].subject is None and t.contacts[1].subject == "barrier"
 assert t.end.frames == 5 and t.end.dropped_frames == 0 and t.end.complete
