@@ -105,6 +105,12 @@ class World:
         nothing then. `load` and `reset` go back to the world's own."""
         raise NotImplementedError("this simulator has no weather or time of day")
 
+    def applied_environment(self):
+        """`ENVIRONMENT_APPLIED` (092 K9): the weather the world shows now, read back from the
+        simulator, as `set_environment`'s `weather` dict (the same keys and units), for the parts
+        the scenario has set. Asked right after each `set_environment`."""
+        raise NotImplementedError("this simulator has no weather read-back")
+
     def set_weather(self, preset, parameters):
         """`WEATHER`: a preset by this simulator's name for it (non-empty: it wins), or
         `parameters` by name ({name: value}; those not named keep their values). Keep it, and

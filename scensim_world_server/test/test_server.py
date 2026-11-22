@@ -327,6 +327,37 @@ class ServerTest(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertIn("Weather refused:\nsnow", r.error)
 
+    def test_a_world_with_the_read_back_answers_what_it_shows(self):
+        """092 K9: ENVIRONMENT_APPLIED answers SetEnvironment with the world's own weather; a
+        world without it answers ok alone, as before."""
+        shown = {}
+
+        def set_environment(weather, time_of_day, sim_time):
+            shown.update({k: v for k, v in (weather or {}).items()})
+            if "fog_visual_range" in shown:          # this world shows fog in 10 m steps
+                shown["fog_visual_range"] = round(shown["fog_visual_range"], -1)
+
+        self.world.set_environment = set_environment
+        self.world.applied_environment = lambda: dict(shown)
+        w = pb.ScenarioWeather()
+        w.fog.visual_range = 123.0
+        w.sun.azimuth, w.sun.elevation = 1.0, 0.2
+        self.world.capabilities = ("ENVIRONMENT",)
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+        r = call(server, set_environment=pb.SetEnvironment(weather=w))
+        self.assertTrue(r.ok, r.error)
+        self.assertEqual(r.WhichOneof("reply"), None)
+        self.world.capabilities = ("ENVIRONMENT", "ENVIRONMENT_APPLIED")
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+        r = call(server, set_environment=pb.SetEnvironment(weather=w))
+        self.assertTrue(r.ok, r.error)
+        a = r.environment.applied
+        self.assertEqual(a.fog.visual_range, 120.0)
+        self.assertEqual((a.sun.azimuth, a.sun.elevation), (1.0, 0.2))
+        self.assertFalse(a.HasField("precipitation"))
+
     def test_signals_come_with_the_world_and_take_colours(self):
         hello(self.server)
         r = call(self.server, load_world=pb.LoadWorld(world="/maps/x.usd", signals=[

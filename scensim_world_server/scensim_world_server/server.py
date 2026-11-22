@@ -65,6 +65,26 @@ def environment_weather(w):
     return out
 
 
+def scenario_weather(d):
+    """`environment_weather`'s inverse: a dict of the parts a world shows as `ScenarioWeather`
+    (092 K9, `ENVIRONMENT_APPLIED`)."""
+    w = pb.ScenarioWeather()
+    if "cloud_cover_oktas" in d:
+        w.cloud_cover.oktas = int(d["cloud_cover_oktas"])
+    if "sun" in d:
+        az, el, lx = (tuple(d["sun"]) + (0.0,))[:3]
+        w.sun.azimuth, w.sun.elevation, w.sun.illuminance = az, el, lx or 0.0
+    if "fog_visual_range" in d:
+        w.fog.visual_range = float(d["fog_visual_range"])
+    if "precipitation" in d:
+        kind, mm = d["precipitation"]
+        w.precipitation.type = pb.PRECIPITATION[kind.upper()]
+        w.precipitation.intensity = float(mm)
+    if "wind" in d:
+        w.wind.direction, w.wind.speed = (float(x) for x in d["wind"])
+    return w
+
+
 def describe(client):
     return f"{client.host}:{client.pid}" if client.pid else "(unnamed client)"
 
@@ -415,6 +435,10 @@ class WorldServer:
             self.world.set_environment(weather, time_of_day, self.sim_time)
         except ValueError as e:
             raise RequestError(f"Weather refused:\n{e}") from e
+        if self.offers("ENVIRONMENT_APPLIED"):
+            # 092 K9: what the world shows now, read back, for a knob profile's record
+            return pb.Reply(ok=True, environment=pb.EnvironmentReply(
+                applied=scenario_weather(self.world.applied_environment())))
         return pb.Reply(ok=True)
 
     def _shutdown(self, _req):

@@ -43,7 +43,9 @@
 // owner lease, `Apply`, `SetStepTime`, `SetGoal`, the weather, `Release`, the rich spawn and
 // read-back a server that moves its own bodies needs. (047's `SetRoadCondition` and
 // `SetEnvironment` need no bump: the bridge sends each only to a server declaring its
-// capability. Nor does `GetSignals`: only `scensim_world_check` sends it.)
+// capability. Nor does `GetSignals`: only `scensim_world_check` sends it. Nor does 092's
+// `EnvironmentReply`: only a server declaring `ENVIRONMENT_APPLIED` sends it, and the bridge
+// reads it only from one.)
 
 syntax = "proto3";
 
@@ -105,6 +107,9 @@ enum Capability {
   CAPABILITY_ROAD_CONDITION = 9;
   // `SetEnvironment` (047): OpenSCENARIO's weather and time of day from the scenario.
   CAPABILITY_ENVIRONMENT = 10;
+  // `EnvironmentReply` to `SetEnvironment` (092 K9, knob profiles): the weather the world shows
+  // after it, read back from the simulator.
+  CAPABILITY_ENVIRONMENT_APPLIED = 11;
 }
 
 // Who sends a request: what the owner lease is checked against.
@@ -591,6 +596,14 @@ message SetEnvironment {
   TimeOfDay time_of_day = 2;
 }
 
+// A server with `ENVIRONMENT_APPLIED` answers `SetEnvironment` with the weather it shows now,
+// read back from its simulator and given in `ScenarioWeather`'s units, for every part the
+// scenario has set so far (a part it was never given is unset). A knob profile's read-back
+// (roadmap 092 K9): the bridge records it per frame beside the value it asked for.
+message EnvironmentReply {
+  ScenarioWeather applied = 1;
+}
+
 // The owner leaves: the server undoes what it did for it (entities destroyed, the simulator's
 // settings restored) and has no owner after. The world stays loaded.
 message Release {}
@@ -632,6 +645,7 @@ message Reply {
     LoadWorldReply load_world = 7;
     WeatherReply weather = 8;
     SignalsReply signals = 10;
+    EnvironmentReply environment = 11;
   }
   // The server cannot go on (a hung simulator call, its simulator gone): it exits after this
   // reply, and the bridge ends as after a request that timed out.

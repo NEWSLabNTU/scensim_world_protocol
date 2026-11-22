@@ -113,6 +113,14 @@ pub trait World {
             "the weather and time of day are not offered by this server",
         ))
     }
+    /// `ENVIRONMENT_APPLIED`: the weather the world shows now, read back from the simulator in
+    /// `ScenarioWeather`'s units, for the parts the scenario has set (092 K9). Asked right
+    /// after each `set_environment` by a server declaring the capability.
+    fn applied_environment(&mut self) -> WorldResult<wire::ScenarioWeather> {
+        Err(Refusal::new(
+            "the weather's read-back is not offered by this server",
+        ))
+    }
     /// A new owner: every entity of the last one goes (`handles`); the world stays.
     fn reset(&mut self, handles: &[u32]) -> WorldResult<()> {
         for h in handles {
@@ -516,7 +524,14 @@ impl<W: World> Shell<W> {
                     "the weather and time of day are",
                 )?;
                 self.world.set_environment(&req)?;
-                ok(None)
+                if self.offers(wire::Capability::EnvironmentApplied) {
+                    let applied = self.world.applied_environment()?;
+                    ok(Some(R::Environment(wire::EnvironmentReply {
+                        applied: Some(applied),
+                    })))
+                } else {
+                    ok(None)
+                }
             }
             Q::Release(_) => {
                 let handles: Vec<u32> = self.entities.keys().copied().collect();

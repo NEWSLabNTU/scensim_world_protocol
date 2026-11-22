@@ -67,6 +67,7 @@ is the error the bridge passes on to SSv2.
 | `set_signals(colours)` | `SIGNALS` | `{opendrive_id: "OFF" / "RED" / "AMBER" / "GREEN"}`, from the next step on |
 | `set_road_condition(friction_scale, wetness, properties)` | `ROAD_CONDITION` | raise `ValueError` listing every problem, and change nothing, for what cannot be applied |
 | `set_environment(weather, time_of_day, sim_time=0.0)` | `ENVIRONMENT` | the parts given (dicts; see the docstring); raise `ValueError` as above |
+| `applied_environment()` | `ENVIRONMENT_APPLIED` | the weather shown now, read back from your simulator, as `set_environment`'s `weather` dict, for the parts the scenario has set; asked after each `set_environment` |
 | `set_weather(preset, parameters)` | `WEATHER` | a preset by your simulator's name for it (non-empty: it wins), or `{name: value}` (those not named keep their values); keep it and apply it again after every `load`; return the weather now as `get_weather` does; raise `ValueError`, naming the valid names, for an unknown one |
 | `get_weather()` | `WEATHER` | `(preset, {name: value})`: the preset the weather matches (`""` if none) and every parameter, by your names |
 | `reset(handles)` | | a new owner or a release: every entity goes, the world stays. Default: `despawn` each |

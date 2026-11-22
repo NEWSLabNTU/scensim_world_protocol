@@ -101,6 +101,7 @@ shells do this for you).
 | `CONTACTS` | reports contacts of reporting bodies | `StepReply.contacts`, `ApplyReply.contacts` |
 | `ROAD_CONDITION` | OpenSCENARIO's road condition, world-wide and per zone | `SetRoadCondition` |
 | `ENVIRONMENT` | OpenSCENARIO's weather and time of day | `SetEnvironment` |
+| `ENVIRONMENT_APPLIED` | reads the weather back after each `SetEnvironment` | `EnvironmentReply` |
 
 A `Spawn` with `motion: TRACKED` needs `TRACKED_MOTION` or `TRACKS_TARGETS`; `AUTOPILOT`
 needs `AUTOPILOT`; `EXTERNAL` for a kind other than `EGO` needs `AGENT_VEHICLES`.
@@ -268,6 +269,14 @@ SSv2's `UpdateEnvironment` weather and time of day. Every part (`cloud_cover`, `
 `precipitation`, `wind`, `time_of_day`) is optional: a part not set is left as it was. A
 server refuses, listing every problem, a part it cannot show, and then changes nothing.
 `LoadWorld` and `Release` go back to the world's own sky.
+
+A server with `ENVIRONMENT_APPLIED` answers with `EnvironmentReply { applied }`: the weather it
+shows now, read back from its simulator in `ScenarioWeather`'s units, for every part the
+scenario has set (a part never given is unset). A knob profile's record reads it (scensim
+roadmap 092 K9): the bridge sends a profile's value as `SetEnvironment` when it moves and
+writes the read-back beside it in the gap trace. CARLA reads back fog, cloud cover, rain and the
+sun (not wind: CARLA keeps no direction for it); Isaac reads back fog, rain and the sun from its
+renderer and the sun light (not clouds or wind, of which it keeps no state of its own).
 
 ### Release, Shutdown
 

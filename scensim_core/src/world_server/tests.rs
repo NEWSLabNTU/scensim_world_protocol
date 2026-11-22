@@ -9,6 +9,7 @@ struct Fake {
     released: Vec<Vec<u32>>,
     fail_step_fatally: bool,
     caps: Vec<wire::Capability>,
+    fog: Option<f64>,
 }
 
 impl World for Fake {
@@ -56,6 +57,21 @@ impl World for Fake {
     fn release(&mut self, handles: &[u32]) -> WorldResult<()> {
         self.released.push(handles.to_vec());
         Ok(())
+    }
+    fn set_environment(&mut self, r: &wire::SetEnvironment) -> WorldResult<()> {
+        if let Some(f) = r.weather.as_ref().and_then(|w| w.fog) {
+            // a world that shows fog only to the nearest 10 m
+            self.fog = Some((f.visual_range / 10.0).round() * 10.0);
+        }
+        Ok(())
+    }
+    fn applied_environment(&mut self) -> WorldResult<wire::ScenarioWeather> {
+        Ok(wire::ScenarioWeather {
+            fog: self
+                .fog
+                .map(|v| wire::scenario_weather::Fog { visual_range: v }),
+            ..Default::default()
+        })
     }
 }
 
@@ -311,4 +327,35 @@ fn a_retired_road_condition_property_is_refused_naming_its_successor() {
         "{}",
         r.error
     );
+}
+
+#[test]
+fn set_environment_answers_what_the_world_shows_when_it_offers_the_read_back() {
+    let fog = |v: f64| {
+        wire::request::Request::SetEnvironment(wire::SetEnvironment {
+            weather: Some(wire::ScenarioWeather {
+                fog: Some(wire::scenario_weather::Fog { visual_range: v }),
+                ..Default::default()
+            }),
+            time_of_day: None,
+        })
+    };
+    // ENVIRONMENT alone: applied, no read-back (as before 092 K9)
+    let mut s = shell(vec![wire::Capability::Environment]);
+    hello(&mut s, 1, false);
+    let r = call(&mut s, 1, fog(123.0));
+    assert!(r.ok && r.reply.is_none(), "{r:?}");
+    // with ENVIRONMENT_APPLIED: the world's own value, not the one asked for
+    let mut s = shell(vec![
+        wire::Capability::Environment,
+        wire::Capability::EnvironmentApplied,
+    ]);
+    hello(&mut s, 1, false);
+    let r = call(&mut s, 1, fog(123.0));
+    match r.reply {
+        Some(wire::reply::Reply::Environment(e)) => {
+            assert_eq!(e.applied.unwrap().fog.unwrap().visual_range, 120.0)
+        }
+        other => panic!("{other:?}"),
+    }
 }

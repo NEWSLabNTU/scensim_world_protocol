@@ -108,6 +108,18 @@ pub enum Record {
         opendrive_id: String,
         colour: String,
     },
+    /// A knob profile's value at a frame (scensim roadmap 092 K9): what the profile asks for
+    /// (`commanded`), what the world last read back (`applied`; null before the first read-back
+    /// or from a server without one), and whether the bridge sent it this frame (`sent`: it
+    /// moved by the profile's step since the last send). One line per profile knob per frame.
+    Knob {
+        frame: u64,
+        sim_time_ns: i64,
+        knob: String,
+        commanded: f64,
+        applied: Option<f64>,
+        sent: bool,
+    },
     End {
         frame: u64,
         sim_time: f64,
@@ -601,6 +613,29 @@ impl GapTrace {
             sim_time_ns,
             opendrive_id: opendrive_id.to_string(),
             colour: colour.to_string(),
+        });
+    }
+
+    /// A knob profile's value at SSv2 frame `frame` (see `Record::Knob`).
+    pub fn knob(
+        &mut self,
+        frame: u64,
+        sim_time_ns: i64,
+        knob: &str,
+        commanded: f64,
+        applied: Option<f64>,
+        sent: bool,
+    ) {
+        if self.open_episode().is_none() {
+            return;
+        }
+        self.push_line(Record::Knob {
+            frame,
+            sim_time_ns,
+            knob: knob.to_string(),
+            commanded,
+            applied,
+            sent,
         });
     }
 
@@ -1099,6 +1134,7 @@ mod tests {
             Some(sim(0.0, 0.0, false))
         });
         t.signal(2, 1_000_100_000_000, "12", "green");
+        t.knob(2, 1_000_100_000_000, "visibility", 840.0, Some(838.0), true);
         // Staged but never ticked: replaced, then left at the end.
         t.stage_frame(3, vec![]);
         t.end_episode();
@@ -1109,8 +1145,13 @@ mod tests {
             types,
             [
                 "episode", "entity", "entity", "frame", "contact", "contact", "contact", "frame",
-                "signal", "end"
+                "signal", "knob", "end"
             ]
+        );
+        assert_eq!(
+            v[9],
+            json!({"type": "knob", "frame": 2, "sim_time_ns": 1_000_100_000_000_i64,
+                   "knob": "visibility", "commanded": 840.0, "applied": 838.0, "sent": true})
         );
         // Slots in header order.
         assert_eq!(v[1]["index"], 0);
@@ -1145,7 +1186,7 @@ mod tests {
             json!(["contact_hold", "kinematic"])
         );
         assert_eq!(
-            v[9],
+            v[10],
             json!({"type": "end", "frame": 2, "sim_time": 0.1, "frames": 2,
                                 "dropped_frames": 0, "complete": true})
         );
