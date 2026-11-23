@@ -206,6 +206,7 @@ fn what_is_not_offered_is_refused() {
         (wire::Motion::Tracked, "TRACKED bodies"),
         (wire::Motion::Autopilot, "AUTOPILOT bodies"),
         (wire::Motion::External, "other than the ego"),
+        (wire::Motion::Commanded, "COMMANDED bodies"),
     ] {
         let r = spawn(&mut s, 1, "x", motion);
         assert!(!r.ok && r.error.contains(needle), "{motion:?}: {}", r.error);
@@ -225,10 +226,12 @@ fn what_is_not_offered_is_refused() {
     let mut s = shell(vec![
         wire::Capability::TracksTargets,
         wire::Capability::Autopilot,
+        wire::Capability::Commands,
     ]);
     hello(&mut s, 1, false);
     assert!(spawn(&mut s, 1, "t", wire::Motion::Tracked).ok);
     assert!(spawn(&mut s, 1, "a", wire::Motion::Autopilot).ok);
+    assert!(spawn(&mut s, 1, "m", wire::Motion::Commanded).ok);
 }
 
 #[test]

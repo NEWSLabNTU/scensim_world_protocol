@@ -45,7 +45,8 @@
 // `SetEnvironment` need no bump: the bridge sends each only to a server declaring its
 // capability. Nor does `GetSignals`: only `scensim_world_check` sends it. Nor does 092's
 // `EnvironmentReply`: only a server declaring `ENVIRONMENT_APPLIED` sends it, and the bridge
-// reads it only from one.)
+// reads it only from one. Nor does 092 K12's `COMMANDED` motion: the bridge spawns one only on a
+// server declaring `COMMANDS`, and `ReadBack.cmd_frame` is a field an older peer ignores.)
 
 syntax = "proto3";
 
@@ -110,6 +111,10 @@ enum Capability {
   // `EnvironmentReply` to `SetEnvironment` (092 K9, knob profiles): the weather the world shows
   // after it, read back from the simulator.
   CAPABILITY_ENVIRONMENT_APPLIED = 11;
+  // `Motion.COMMANDED` bodies (092 K12): the server integrates a behaviour model's kinematic
+  // commands, which reach it with its tick gate's acknowledgements, and reads each one back
+  // with the frame its command answered (`ReadBack.cmd_frame`). Needs `READS_BACK`.
+  CAPABILITY_COMMANDS = 12;
 }
 
 // Who sends a request: what the owner lease is checked against.
@@ -239,6 +244,10 @@ enum Motion {
   EXTERNAL = 2;
   // The simulator's own traffic drives it toward `SetGoal`'s goal (`AUTOPILOT`).
   AUTOPILOT = 3;
+  // A behaviour model's kinematic commands move it (`COMMANDS`, 092 K12): the server integrates
+  // each command (speed toward the commanded speed within its acceleration limit, then along
+  // the heading) and poses the body kinematically. Read back, never posed.
+  COMMANDED = 4;
 }
 
 message Axles {
@@ -370,6 +379,9 @@ message ReadBack {
   Twist twist = 3;
   Vec3 accel = 4;
   double linear_jerk = 5;
+  // A `COMMANDED` body (`COMMANDS`): the tick-gate frame whose command moved it in this step;
+  // 0 before its first command.
+  uint64 cmd_frame = 6;
 }
 
 // One tracked body's frame, from a server that tracks (`TRACKS_TARGETS`).

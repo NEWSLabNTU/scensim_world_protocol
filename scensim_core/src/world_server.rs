@@ -431,6 +431,9 @@ impl<W: World> Shell<W> {
                     wire::Motion::Autopilot => {
                         self.need(wire::Capability::Autopilot, "AUTOPILOT bodies are")?
                     }
+                    wire::Motion::Commanded => {
+                        self.need(wire::Capability::Commands, "COMMANDED bodies are")?
+                    }
                     wire::Motion::External if req.kind != wire::Kind::Ego as i32 => self.need(
                         wire::Capability::AgentVehicles,
                         "externally driven vehicles other than the ego are",

@@ -157,10 +157,10 @@ the same episode. A world does nothing for either.
 
 ### What the Python shell does not carry
 
-`AUTOPILOT`, `TRACKS_TARGETS` and `READS_BACK` have no `World` method: the shell refuses
+`AUTOPILOT`, `TRACKS_TARGETS`, `READS_BACK` and `COMMANDS` have no `World` method: the shell refuses
 `SetGoal` outright, does not pass `EntityPose.ssv2_twist` to the world, and answers every
 `Apply` with an empty `ApplyReply` (no read-back, no tracking samples). A Python world must
-not declare these three; one that does fails the conformance check (`TRACKS_TARGETS`) or
+not declare these four; one that does fails the conformance check (`TRACKS_TARGETS`) or
 misleads the bridge. They need the Rust shell, or an extension of this one. (`WEATHER` is
 carried: `set_weather` and `get_weather` above; the shell refuses an empty request and turns
 a `ValueError` into a `WeatherReply` with `success: false`.) `AGENT_VEHICLES` passes through `spawn`

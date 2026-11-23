@@ -268,7 +268,8 @@ class WorldServer:
             raise RequestError(f"{req.name!r}: box dimensions {d.x}, {d.y}, {d.z} are not a box")
         kind = pb.KIND_NAME.get(req.kind, "KIND_UNSPECIFIED")
         motion = pb.MOTION_NAME.get(req.motion, "KINEMATIC")
-        needs = {"TRACKED": ("TRACKED_MOTION", "TRACKS_TARGETS"), "AUTOPILOT": ("AUTOPILOT",)}
+        needs = {"TRACKED": ("TRACKED_MOTION", "TRACKS_TARGETS"), "AUTOPILOT": ("AUTOPILOT",),
+                 "COMMANDED": ("COMMANDS",)}
         if motion in needs and not any(self.offers(c) for c in needs[motion]):
             raise RequestError(f"{req.name!r}: {motion} bodies are not offered by this server")
         if motion == "EXTERNAL" and kind != "EGO" and not self.offers("AGENT_VEHICLES"):

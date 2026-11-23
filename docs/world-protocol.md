@@ -102,9 +102,12 @@ shells do this for you).
 | `ROAD_CONDITION` | OpenSCENARIO's road condition, world-wide and per zone | `SetRoadCondition` |
 | `ENVIRONMENT` | OpenSCENARIO's weather and time of day | `SetEnvironment` |
 | `ENVIRONMENT_APPLIED` | reads the weather back after each `SetEnvironment` | `EnvironmentReply` |
+| `COMMANDS` | moves `COMMANDED` bodies by a behaviour model's kinematic commands, which reach it with its tick gate's acknowledgements, and reads each back with the frame its command answered; needs `READS_BACK` | `Motion.COMMANDED`; `ReadBack.cmd_frame` |
 
 A `Spawn` with `motion: TRACKED` needs `TRACKED_MOTION` or `TRACKS_TARGETS`; `AUTOPILOT`
-needs `AUTOPILOT`; `EXTERNAL` for a kind other than `EGO` needs `AGENT_VEHICLES`.
+needs `AUTOPILOT`; `EXTERNAL` for a kind other than `EGO` needs `AGENT_VEHICLES`; `COMMANDED`
+needs `COMMANDS`. The bridge spawns a `COMMANDED` body only on a server declaring `COMMANDS`
+and `READS_BACK`, so the motion needed no protocol version: an older server never sees it.
 
 ## The requests
 
@@ -152,7 +155,7 @@ One entity: a body at `pose` with a box collider, moving as `motion` says.
 | `box_center`, `box_dimensions`, `box_declared` | the declared box (centre from the entity origin; length, width, height). The Python shell refuses dimensions that are not all positive |
 | `pose` | world frame, entity origin |
 | `model`, `asset_key` | the look: SSv2's asset key after and before the bridge's asset map. A CARLA blueprint id (`vehicle.tesla.model3`) is what both servers of this project know. Empty or unknown: the server's default for the kind |
-| `motion` | `KINEMATIC` (posed every step, pushed by nothing), `TRACKED`, `EXTERNAL` (the simulator's physics moves it and something else drives it: read back, never posed), `AUTOPILOT` |
+| `motion` | `KINEMATIC` (posed every step, pushed by nothing), `TRACKED`, `EXTERNAL` (the simulator's physics moves it and something else drives it: read back, never posed), `AUTOPILOT`, `COMMANDED` (the server integrates a behaviour model's commands: read back, never posed) |
 | `role_name` | the name the simulator knows the vehicle by, for whoever attaches to it (the ego's role name) |
 | `axles`, `performance` | as SSv2 declared them |
 
@@ -194,11 +197,11 @@ Handles the server does not know are refused (the whole request). The drive of e
   this step on (the bridge's fallback for a blocked body) and goes to `pose`.
 - `TRACKED` under `TRACKS_TARGETS`: given SSv2's `pose` and `ssv2_twist`; the server
   decides how to follow.
-- `EXTERNAL` and `AUTOPILOT`: listed with nothing set, so the server knows SSv2 still has them
+- `EXTERNAL`, `AUTOPILOT` and `COMMANDED`: listed with nothing set, so the server knows SSv2 still has them
   this frame.
 
 The reply: `read_back` (`READS_BACK`: pose, twist, acceleration and jerk of each body the
-server moves), `tracking` (`TRACKS_TARGETS`: one `TrackingSample` per tracked body),
+server moves; a `COMMANDED` body's also carries `cmd_frame`), `tracking` (`TRACKS_TARGETS`: one `TrackingSample` per tracked body),
 `failure` (what failed, for SSv2's reply; empty when nothing did) and `contacts` learned
 since the last reply (a simulator that reports them asynchronously, belonging to the last
 step). The drives take effect at the next `Step`.
