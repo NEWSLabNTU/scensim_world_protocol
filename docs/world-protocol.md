@@ -102,7 +102,7 @@ shells do this for you).
 | `ROAD_CONDITION` | OpenSCENARIO's road condition, world-wide and per zone | `SetRoadCondition` |
 | `ENVIRONMENT` | OpenSCENARIO's weather and time of day | `SetEnvironment` |
 | `ENVIRONMENT_APPLIED` | reads the weather back after each `SetEnvironment` | `EnvironmentReply` |
-| `COMMANDS` | moves `COMMANDED` bodies by a behaviour model's kinematic commands, which reach it with its tick gate's acknowledgements, and reads each back with the frame its command answered; needs `READS_BACK` | `Motion.COMMANDED`; `ReadBack.cmd_frame`, `EntityState.cmd_frame` |
+| `COMMANDS` | moves `COMMANDED` bodies by a behaviour model's kinematic commands, which reach it with its tick gate's acknowledgements, and reads each back with the frame its command answered; needs `READS_BACK` | `Motion.COMMANDED`; `ReadBack.cmd_frame`, `EntityState.cmd_frame`, `StepReply.command_counts` |
 
 A `Spawn` with `motion: TRACKED` needs `TRACKED_MOTION` or `TRACKS_TARGETS`; `AUTOPILOT`
 needs `AUTOPILOT`; `EXTERNAL` for a kind other than `EGO` needs `AGENT_VEHICLES`; `COMMANDED`
@@ -222,6 +222,7 @@ must carry every entity's state; a server that has them anyway may always send t
 | `states` | every entity's `EntityState`: pose after the step, world frame, at the **body's** origin (`Body.origin_offset` from the entity origin); `twist`, the body's velocity, where the server has it; `cmd_frame`, a `COMMANDED` body's, as its read-back |
 | `contacts` | `CONTACTS`: a reporting body (the ego, a tracked body) touching another at any substep, once per pair and reporting side. `other` is the other entity's handle, 0 for the environment or a body the bridge did not spawn; `impulse` the total normal impulse over the step, N s |
 | `tick_seconds` | the time the server spent stepping the simulator, s, for the bridge's frame budget |
+| `command_counts` | `COMMANDS`: since the world's last load, the commands naming an entity that is not a `COMMANDED` body (each entity and frame once), the frames the tick gate ticked on without an acknowledgement, and the datagrams dropped whole; unset elsewhere |
 
 ### SetStepTime
 

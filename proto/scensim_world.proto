@@ -498,6 +498,19 @@ message StepReply {
   double tick_seconds = 6;
   // The episode the step is in (LoadWorldReply's); 0 from a server that does not say.
   uint64 episode_id = 7;
+  // A `COMMANDS` server's counts since its world's last load (scensim roadmap 092 K12, D7);
+  // unset on a server without `COMMANDS`. Additive: a peer of the other version ignores it.
+  CommandCounts command_counts = 8;
+}
+
+// What a `COMMANDS` server could not apply, since its world's last load.
+message CommandCounts {
+  // Commands naming an entity that is not a COMMANDED body here, each (entity, frame) once.
+  uint64 unknown_entity = 1;
+  // Frames the tick gate ticked on without a follower's acknowledgement (its timeout).
+  uint64 gate_misses = 2;
+  // Datagrams dropped whole: over a bound, or not parsing.
+  uint64 malformed = 3;
 }
 
 // SSv2's `UpdateStepTime`.

@@ -85,6 +85,10 @@ pub enum Record {
         /// K2.4: a batch replay's `start_frames`). Absent when unknown.
         #[serde(skip_serializing_if = "Option::is_none")]
         npc_logic_started: Option<bool>,
+        /// A `COMMANDS` world server's counts since its world's last load (schema 3, scensim
+        /// 092 K12); absent elsewhere.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        commands: Option<CommandCounts>,
         entities: BTreeMap<String, EntityState>,
     },
     Contact {
@@ -230,6 +234,18 @@ pub struct EntityHeader {
     pub asset_box: Option<AssetBox>,
 }
 
+/// What a world server that commands bodies could not apply, since its world's last load
+/// (`StepReply.command_counts`, scensim 092 K12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CommandCounts {
+    /// Commands naming an entity that is not commanded there, each (entity, frame) once.
+    pub unknown_entity: u64,
+    /// Frames its tick gate ticked on without an acknowledgement.
+    pub gate_misses: u64,
+    /// Datagrams it dropped whole.
+    pub malformed: u64,
+}
+
 /// One entity in one frame line.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EntityState {
@@ -299,6 +315,7 @@ struct Staged {
     sim_time: f64,
     entities: Vec<StagedEntity>,
     npc_logic_started: Option<bool>,
+    commands: Option<CommandCounts>,
 }
 
 /// What the writer thread is told.
@@ -454,11 +471,20 @@ impl GapTrace {
             sim_time,
             entities,
             npc_logic_started: None,
+            commands: None,
         });
     }
 
     /// SSv2's `npc_logic_started` for the staged frame `frame` (from the `UpdateEntityStatus`
     /// that staged it).
+    /// The world server's command counts after the step that completes the staged frame
+    /// (scensim 092 K12): call before [`GapTrace::emit_staged_at`].
+    pub fn command_counts(&mut self, counts: CommandCounts) {
+        if let Some(staged) = self.episode.as_mut().and_then(|ep| ep.staged.as_mut()) {
+            staged.commands = Some(counts);
+        }
+    }
+
     pub fn npc_logic(&mut self, frame: u64, started: bool) {
         if let Some(staged) = self
             .episode
@@ -555,6 +581,7 @@ impl GapTrace {
             sim_frame,
             wall_ns,
             npc_logic_started: staged.npc_logic_started,
+            commands: staged.commands,
             entities,
         };
         if self.try_frame(record.to_line()) {
@@ -1015,13 +1042,19 @@ mod tests {
             sim_frame: None,
             wall_ns: Some(351_000_000),
             npc_logic_started: Some(true),
+            commands: Some(CommandCounts {
+                unknown_entity: 1,
+                gate_misses: 2,
+                malformed: 0,
+            }),
             entities,
         };
         assert_eq!(
             parse(&r),
             json!({"type": "frame", "frame": 7, "sim_time": 0.35,
                 "sim_time_ns": 1_000_350_000_000_i64, "wall_ns": 351_000_000_i64,
-                "npc_logic_started": true, "entities": {
+                "npc_logic_started": true,
+                "commands": {"unknown_entity": 1, "gate_misses": 2, "malformed": 0}, "entities": {
                 "ego": {"ssv2": [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
                         "sim_pose": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0],
                         "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured",
