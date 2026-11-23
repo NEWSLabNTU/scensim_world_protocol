@@ -39,8 +39,9 @@ use crate::contact_report::{self, RawCollision};
 /// values neutrally (`sim_pose`, `sim_frame`, `sim_id`, `asset`, `asset_box`) where schema 1
 /// named them after CARLA, and adds the entity's `index`, `role` and `subtype`, `sim_time_ns`,
 /// `angular_velocity`, `velocity_source`, the episode's `map` and `step_time`, and `signal`
-/// lines. Schema 3 adds a commanded entity's `cmd_frame` (scensim roadmap 092 K12). Readers
-/// read each file by its schema.
+/// lines. Schema 3 adds a commanded entity's `cmd_frame` (scensim roadmap 092 K12) and, optional
+/// within it, a physics vehicle's applied `control` (scensim issue 135). Readers read each file
+/// by its schema.
 pub const SCHEMA: u32 = 3;
 
 /// Lines the writer channel holds: about 25 s of frames at 20 Hz with a few entities, so
@@ -267,8 +268,25 @@ pub struct EntityState {
     /// (0 before its first command); absent otherwise (schema 3, scensim roadmap 092 K12).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cmd_frame: Option<u64>,
+    /// A physics vehicle's actuator control as the simulator held it this frame
+    /// (`AppliedControl` on the wire); absent otherwise (scensim issue 135).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control: Option<AppliedControl>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<&'static str>,
+}
+
+/// A vehicle's actuator control in the simulator's units, as it held it in a frame: throttle
+/// and brake 0..1, steer -1..1 (CARLA's sign), the flags and the gear (scensim issue 135).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct AppliedControl {
+    pub throttle: f64,
+    pub brake: f64,
+    pub steer: f64,
+    pub hand_brake: bool,
+    pub reverse: bool,
+    pub manual_gear_shift: bool,
+    pub gear: i32,
 }
 
 /// The vehicle command an ego ran in a frame: the latest its vehicle interface took by the
@@ -297,6 +315,8 @@ pub struct SimState {
     pub command: Option<TakenCommand>,
     /// A commanded entity's `cmd_frame`, as the world server read it back.
     pub cmd_frame: Option<u64>,
+    /// A physics vehicle's actuator control as the world server held it (issue 135).
+    pub control: Option<AppliedControl>,
 }
 
 /// One entity of a staged frame: what SSv2 had, before CARLA's half is known.
@@ -572,6 +592,7 @@ impl GapTrace {
                     velocity_source: sim.map(|c| if c.measured { "measured" } else { "derived" }),
                     command: sim.and_then(|c| c.command),
                     cmd_frame: sim.and_then(|c| c.cmd_frame),
+                    control: sim.and_then(|c| c.control),
                     flags,
                 },
             );
@@ -1022,6 +1043,15 @@ mod tests {
                     arrived: 2,
                 }),
                 cmd_frame: None,
+                control: Some(AppliedControl {
+                    throttle: 0.25,
+                    brake: 0.0,
+                    steer: -0.5,
+                    hand_brake: false,
+                    reverse: false,
+                    manual_gear_shift: false,
+                    gear: 0,
+                }),
                 flags: vec![],
             },
         );
@@ -1035,6 +1065,7 @@ mod tests {
                 velocity_source: None,
                 command: None,
                 cmd_frame: Some(6),
+                control: None,
                 flags: vec!["spawn", "contact_hold"],
             },
         );
@@ -1065,7 +1096,10 @@ mod tests {
                         "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured",
                         "command": {"stamp_ns": 1_000_300_000_000_i64, "acceleration": 1.0,
                                     "velocity": 3.0, "tire_angle": 0.0, "gear": 2,
-                                    "arrived": 2}},
+                                    "arrived": 2},
+                        "control": {"throttle": 0.25, "brake": 0.0, "steer": -0.5,
+                                    "hand_brake": false, "reverse": false,
+                                    "manual_gear_shift": false, "gear": 0}},
                 "npc": {"ssv2": [5.0, 2.0, 0.0, 0.0, 0.0, 0.0], "sim_pose": null,
                         "velocity": null, "angular_velocity": null, "velocity_source": null,
                         "cmd_frame": 6, "flags": ["spawn", "contact_hold"]}}})
@@ -1135,6 +1169,7 @@ mod tests {
             measured,
             command: None,
             cmd_frame: None,
+            control: None,
         }
     }
 

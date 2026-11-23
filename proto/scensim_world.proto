@@ -445,6 +445,25 @@ message EntityState {
   // A `COMMANDED` body (`COMMANDS`): the tick-gate frame whose command moved it in this step,
   // as its `ReadBack`; 0 before its first command (scensim roadmap 092 K12; truth schema 3).
   uint64 cmd_frame = 5;
+  // A physics vehicle's actuator control as the simulator held it for this step, raw (scensim
+  // issue 135): on CARLA the ego's and every tracked vehicle's; unset elsewhere (Isaac, a
+  // kinematic body, a walker). Additive (no protocol bump).
+  AppliedControl applied_control = 6;
+}
+
+// A vehicle's actuator control in the simulator's own units, as it held it in a step (scensim
+// issue 135): not an Autoware command, which `TakenCommand` is. On CARLA, the `VehicleControl`
+// of the step's snapshot (`Vehicle::GetControl`).
+message AppliedControl {
+  // Throttle and brake 0..1; steer -1 (full left) .. 1 (full right), CARLA's sign.
+  double throttle = 1;
+  double brake = 2;
+  double steer = 3;
+  bool hand_brake = 4;
+  bool reverse = 5;
+  bool manual_gear_shift = 6;
+  // The gear it asks for (CARLA: 0 is automatic when manual_gear_shift is off).
+  int32 gear = 7;
 }
 
 // The command an ego's vehicle ran in a step (scensim roadmap 092 K2.4): its own vehicle

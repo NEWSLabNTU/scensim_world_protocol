@@ -57,3 +57,39 @@ pub mod std_msgs {
 pub mod scensim_world {
     include!(concat!(env!("OUT_DIR"), "/scensim_world.rs"));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::scensim_world::{AppliedControl, EntityState};
+    use prost::Message;
+
+    /// Issue 135: `applied_control` round-trips, and a peer that never sets it (an older server,
+    /// Isaac) reads as unset, not as a zero control.
+    #[test]
+    fn applied_control_round_trips_and_is_unset_when_absent() {
+        let c = AppliedControl {
+            throttle: 0.25,
+            brake: 0.5,
+            steer: -0.75,
+            hand_brake: true,
+            reverse: true,
+            manual_gear_shift: true,
+            gear: -1,
+        };
+        let with = EntityState {
+            handle: 3,
+            applied_control: Some(c),
+            ..Default::default()
+        };
+        let back = EntityState::decode(with.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(back.applied_control, Some(c));
+        let without = EntityState {
+            handle: 3,
+            cmd_frame: 7,
+            ..Default::default()
+        };
+        let back = EntityState::decode(without.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(back.applied_control, None);
+        assert_eq!(back.cmd_frame, 7);
+    }
+}
