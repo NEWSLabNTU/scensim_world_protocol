@@ -244,6 +244,9 @@ pub struct CommandCounts {
     pub gate_misses: u64,
     /// Datagrams it dropped whole.
     pub malformed: u64,
+    /// Commands it dropped as answering a frame at or before a floor (an earlier body's or
+    /// run's), each (entity, frame) once.
+    pub stale: u64,
 }
 
 /// One entity in one frame line.
@@ -1046,6 +1049,7 @@ mod tests {
                 unknown_entity: 1,
                 gate_misses: 2,
                 malformed: 0,
+                stale: 3,
             }),
             entities,
         };
@@ -1054,7 +1058,8 @@ mod tests {
             json!({"type": "frame", "frame": 7, "sim_time": 0.35,
                 "sim_time_ns": 1_000_350_000_000_i64, "wall_ns": 351_000_000_i64,
                 "npc_logic_started": true,
-                "commands": {"unknown_entity": 1, "gate_misses": 2, "malformed": 0}, "entities": {
+                "commands": {"unknown_entity": 1, "gate_misses": 2, "malformed": 0,
+                    "stale": 3}, "entities": {
                 "ego": {"ssv2": [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
                         "sim_pose": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0],
                         "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured",

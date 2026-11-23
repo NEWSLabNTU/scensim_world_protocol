@@ -511,6 +511,10 @@ message CommandCounts {
   uint64 gate_misses = 2;
   // Datagrams dropped whole: over a bound, or not parsing.
   uint64 malformed = 3;
+  // Commands answering a frame at or before a floor (the frame its body was spawned or
+  // destroyed at, or the world's last step before a reset), dropped and never applied, each
+  // (entity, frame) once: a datagram of an earlier body or run. Not a failure; a leak to see.
+  uint64 stale = 4;
 }
 
 // SSv2's `UpdateStepTime`.
