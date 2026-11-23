@@ -442,6 +442,9 @@ message EntityState {
   // An ego's vehicle command that ran in this step, on a server that drives the ego's
   // vehicle interface itself (Isaac); unset elsewhere and before the first command.
   TakenCommand command = 4;
+  // A `COMMANDED` body (`COMMANDS`): the tick-gate frame whose command moved it in this step,
+  // as its `ReadBack`; 0 before its first command (scensim roadmap 092 K12; truth schema 3).
+  uint64 cmd_frame = 5;
 }
 
 // The command an ego's vehicle ran in a step (scensim roadmap 092 K2.4): its own vehicle

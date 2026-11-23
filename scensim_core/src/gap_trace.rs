@@ -39,8 +39,9 @@ use crate::contact_report::{self, RawCollision};
 /// values neutrally (`sim_pose`, `sim_frame`, `sim_id`, `asset`, `asset_box`) where schema 1
 /// named them after CARLA, and adds the entity's `index`, `role` and `subtype`, `sim_time_ns`,
 /// `angular_velocity`, `velocity_source`, the episode's `map` and `step_time`, and `signal`
-/// lines. Readers read each file by its schema.
-pub const SCHEMA: u32 = 2;
+/// lines. Schema 3 adds a commanded entity's `cmd_frame` (scensim roadmap 092 K12). Readers
+/// read each file by its schema.
+pub const SCHEMA: u32 = 3;
 
 /// Lines the writer channel holds: about 25 s of frames at 20 Hz with a few entities, so
 /// only a disk stalled for that long drops a frame.
@@ -187,6 +188,8 @@ pub enum Role {
     Autopilot,
     /// A behaviour agent over the relay.
     Agent,
+    /// Moved by the world server on a behaviour model's commands (schema 3, scensim 092 K12).
+    Model,
 }
 
 impl Role {
@@ -196,6 +199,7 @@ impl Role {
             Role::Scenario => "scenario",
             Role::Autopilot => "autopilot",
             Role::Agent => "agent",
+            Role::Model => "model",
         }
     }
 }
@@ -240,6 +244,10 @@ pub struct EntityState {
     /// interface (`TakenCommand` on the wire); absent otherwise (scensim roadmap 092 K2.4).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<TakenCommand>,
+    /// For an entity a behaviour model commands: the frame whose command moved it this frame
+    /// (0 before its first command); absent otherwise (schema 3, scensim roadmap 092 K12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmd_frame: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub flags: Vec<&'static str>,
 }
@@ -268,6 +276,8 @@ pub struct SimState {
     pub measured: bool,
     /// The ego's command the world server reports it ran, if any.
     pub command: Option<TakenCommand>,
+    /// A commanded entity's `cmd_frame`, as the world server read it back.
+    pub cmd_frame: Option<u64>,
 }
 
 /// One entity of a staged frame: what SSv2 had, before CARLA's half is known.
@@ -532,6 +542,7 @@ impl GapTrace {
                     angular_velocity: sim.map(|c| c.angular_velocity),
                     velocity_source: sim.map(|c| if c.measured { "measured" } else { "derived" }),
                     command: sim.and_then(|c| c.command),
+                    cmd_frame: sim.and_then(|c| c.cmd_frame),
                     flags,
                 },
             );
@@ -934,7 +945,7 @@ mod tests {
         };
         assert_eq!(
             parse(&r),
-            json!({"type": "episode", "schema": 2, "episode": 3,
+            json!({"type": "episode", "schema": 3, "episode": 3,
                    "start_unix": 1_760_000_000.25, "npc_motion": "tracked",
                    "map": "Town01", "step_time": 0.05})
         );
@@ -980,6 +991,7 @@ mod tests {
                     gear: 2,
                     arrived: 2,
                 }),
+                cmd_frame: None,
                 flags: vec![],
             },
         );
@@ -992,6 +1004,7 @@ mod tests {
                 angular_velocity: None,
                 velocity_source: None,
                 command: None,
+                cmd_frame: Some(6),
                 flags: vec!["spawn", "contact_hold"],
             },
         );
@@ -1017,7 +1030,7 @@ mod tests {
                                     "arrived": 2}},
                 "npc": {"ssv2": [5.0, 2.0, 0.0, 0.0, 0.0, 0.0], "sim_pose": null,
                         "velocity": null, "angular_velocity": null, "velocity_source": null,
-                        "flags": ["spawn", "contact_hold"]}}})
+                        "cmd_frame": 6, "flags": ["spawn", "contact_hold"]}}})
         );
     }
 
@@ -1083,6 +1096,7 @@ mod tests {
             angular_velocity: [0.0, 0.0, 0.0],
             measured,
             command: None,
+            cmd_frame: None,
         }
     }
 
@@ -1303,7 +1317,7 @@ sys.path.insert(0, sys.argv[1])
 import gap_trace
 t = gap_trace.load_trace(sys.argv[2])
 assert t.episode.episode == 2 and t.episode.npc_motion == "tracked", t.episode
-assert t.episode.schema == 2 and t.episode.map == "field" and t.episode.step_time == 0.05
+assert t.episode.schema == 3 and t.episode.map == "field" and t.episode.step_time == 0.05
 assert sorted(t.entities) == ["barrier", "ego"], t.entities
 assert t.entities["barrier"].asset_box is None
 assert t.entities["ego"].index == 0 and t.entities["barrier"].index == 1

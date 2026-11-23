@@ -103,9 +103,16 @@ pub enum EntityKind {
         /// The declared wheels, when SSv2 declared both axles.
         wheels: Option<Wheels>,
     },
-    Pedestrian,
+    Pedestrian {
+        /// Controller `model` (SSv2's `behavior`, [`MODEL_BEHAVIOR`]): the world server moves it
+        /// by a behaviour model's commands (Motion COMMANDED, scensim roadmap 092 K12).
+        model: bool,
+    },
     MiscObject,
 }
+
+/// The controller name of an entity a behaviour model commands (scensim roadmap 092 K12).
+pub const MODEL_BEHAVIOR: &str = "model";
 
 /// A vehicle's wheels in its entity frame (x forward from the entity origin, which for SSv2 is
 /// the rear axle on the ground), m: what SSv2 declares and what a world server measured on its
