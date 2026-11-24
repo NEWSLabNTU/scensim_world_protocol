@@ -1052,10 +1052,66 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
                 }),
             })
         };
+        let applied = has(wire::Capability::RoadConditionApplied);
+        let zones = has(wire::Capability::RoadZones);
         r.check(
             "a world-wide road condition is taken (ROAD_CONDITION)",
-            call(&mut c, road(0.7, "wetWithPuddles", &[]), TIMEOUT * 5).map(|_| String::new()),
+            match call(&mut c, road(0.7, "wetWithPuddles", &[]), TIMEOUT * 5) {
+                // ROAD_CONDITION_APPLIED (092 K9f-a, 086 C7): the road state read back
+                Ok(reply) if applied => match reply.reply {
+                    Some(wire::reply::Reply::RoadCondition(a))
+                        if (a.friction_scale_factor - 0.7).abs() < 1e-5
+                            && a.wetness == "wetWithPuddles"
+                            && (zones || a.zones.is_empty()) =>
+                    {
+                        Ok(format!(
+                            "read back {} {}",
+                            a.friction_scale_factor, a.wetness
+                        ))
+                    }
+                    other => Err(format!(
+                        "ROAD_CONDITION_APPLIED, but the reply is {other:?}"
+                    )),
+                },
+                Ok(reply) => match reply.reply {
+                    None => Ok(String::new()),
+                    other => Err(format!("no ROAD_CONDITION_APPLIED, but a reply {other:?}")),
+                },
+                Err(e) => Err(e),
+            },
         );
+        if applied {
+            // every wetness level at scale 1, and 0.8 at wetWithPuddles: read back, not echoed
+            // (086 C7's acceptance)
+            let levels = [
+                (1.0, "dry"),
+                (1.0, "moist"),
+                (1.0, "wetWithPuddles"),
+                (1.0, "lowFlooded"),
+                (1.0, "highFlooded"),
+                (0.8, "wetWithPuddles"),
+            ];
+            let mut bad = Vec::new();
+            let mut seen = Vec::new();
+            for (f, w) in levels {
+                match call(&mut c, road(f, w, &[]), TIMEOUT * 5).map(|x| x.reply) {
+                    Ok(Some(wire::reply::Reply::RoadCondition(a)))
+                        if (a.friction_scale_factor - f).abs() < 1e-5 && a.wetness == w =>
+                    {
+                        seen.push(format!("{w} {:.6}", a.friction_scale_factor))
+                    }
+                    other => bad.push(format!("{f} {w}: {other:?}")),
+                }
+            }
+            r.check(
+                "every wetness level is read back (ROAD_CONDITION_APPLIED)",
+                if bad.is_empty() {
+                    Ok(seen.join(", "))
+                } else {
+                    Err(bad.join("; "))
+                },
+            );
+        }
         r.check(
             "a zone the map does not have is refused, by name (ROAD_CONDITION)",
             match call(
@@ -1078,6 +1134,21 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
     } else {
         r.skip("road condition", "no ROAD_CONDITION");
     }
+    // 092 K9f-a, 086 C7: ROAD_ZONES needs ROAD_CONDITION_APPLIED, which needs ROAD_CONDITION
+    r.check(
+        "the road capabilities come with what they need",
+        match (
+            has(wire::Capability::RoadCondition),
+            has(wire::Capability::RoadConditionApplied),
+            has(wire::Capability::RoadZones),
+        ) {
+            (_, _, true) if !has(wire::Capability::RoadConditionApplied) => {
+                Err("ROAD_ZONES without ROAD_CONDITION_APPLIED".into())
+            }
+            (false, true, _) => Err("ROAD_CONDITION_APPLIED without ROAD_CONDITION".into()),
+            _ => Ok(String::new()),
+        },
+    );
     if has(wire::Capability::Environment) {
         use wire::scenario_weather as sw;
         // A clear noon with no fog and no rain: what every server can show.
