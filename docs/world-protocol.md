@@ -126,6 +126,7 @@ versions in the message. The reply:
 | `instance` | unique per server process. A bridge that sees it change knows the server restarted and every entity it had is gone |
 | `max_physics_dt` | the longest physics step the server takes, s. The bridge splits each SSv2 step into `n = ceil(step / max_physics_dt)` substeps of `step / n`. 0: the server takes SSv2's step whole |
 | `ready`, `not_ready_reason` | whether the server can load a world now (CARLA: connected to its server) |
+| `boot_id` | the server host's boot id (`/proc/sys/kernel/random/boot_id`): `StepReply`'s `CLOCK_MONOTONIC` times compare only with times taken under the same one (scensim issue 135); empty where the server does not say |
 
 ### LoadWorld -> LoadWorldReply
 
@@ -223,6 +224,7 @@ must carry every entity's state; a server that has them anyway may always send t
 | `contacts` | `CONTACTS`: a reporting body (the ego, a tracked body) touching another at any substep, once per pair and reporting side. `other` is the other entity's handle, 0 for the environment or a body the bridge did not spawn; `impulse` the total normal impulse over the step, N s |
 | `tick_seconds` | the time the server spent stepping the simulator, s, for the bridge's frame budget |
 | `command_counts` | `COMMANDS`: since the world's last load, the commands naming an entity that is not a `COMMANDED` body (each entity and frame once), the frames the tick gate ticked on without an acknowledgement, the datagrams dropped whole, and the commands dropped as stale (answering a frame at or before a floor: the frame the entity's body was spawned or destroyed at, or the world's last step before a reset; each entity and frame once); unset elsewhere |
+| `tick_start_mono_ns`, `tick_return_mono_ns` | `CLOCK_MONOTONIC`, ns, on the server just before its call to the simulator's tick that produced the reply's frame and when it returned (scensim issue 135); the start precedes the simulator's own by up to the call's send latency; comparable only within the boot `HelloReply.boot_id` names; 0 where the server does not say (Isaac) |
 
 ### SetStepTime
 

@@ -351,6 +351,9 @@ impl<W: World> Shell<W> {
             max_physics_dt: self.world.max_physics_dt(),
             ready: ready.is_ok(),
             not_ready_reason: ready.err().unwrap_or_default(),
+            // this host's boot: the step replies' CLOCK_MONOTONIC times compare only within
+            // it (scensim issue 135)
+            boot_id: boot_id(),
         }))))
     }
 
@@ -635,3 +638,11 @@ pub fn die_with_parent() {
 
 #[cfg(test)]
 mod tests;
+
+/// This host's boot id (`/proc/sys/kernel/random/boot_id`), empty where it cannot be read:
+/// `CLOCK_MONOTONIC` times compare only between processes under the same one (scensim issue 135).
+pub fn boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}

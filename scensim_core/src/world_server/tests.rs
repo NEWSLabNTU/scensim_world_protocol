@@ -362,3 +362,12 @@ fn set_environment_answers_what_the_world_shows_when_it_offers_the_read_back() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Issue 135 step 3: the boot id a Hello carries is this host's, a UUID.
+#[test]
+fn boot_id_is_this_hosts_uuid() {
+    let id = super::boot_id();
+    assert_eq!(id.len(), 36, "{id}");
+    assert_eq!(id.matches('-').count(), 4, "{id}");
+    assert_eq!(id, super::boot_id());
+}

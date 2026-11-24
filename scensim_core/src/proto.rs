@@ -60,7 +60,7 @@ pub mod scensim_world {
 
 #[cfg(test)]
 mod tests {
-    use super::scensim_world::{AppliedControl, EntityState};
+    use super::scensim_world::{AppliedControl, EntityState, StepReply};
     use prost::Message;
 
     /// Issue 135: `applied_control` round-trips, and a peer that never sets it (an older server,
@@ -91,5 +91,32 @@ mod tests {
         let back = EntityState::decode(without.encode_to_vec().as_slice()).unwrap();
         assert_eq!(back.applied_control, None);
         assert_eq!(back.cmd_frame, 7);
+    }
+
+    /// Issue 135 step 3: the tick's start and return stamps round-trip, and a server that does
+    /// not stamp (Isaac, an older one) reads as 0, which the bridge leaves out of the truth.
+    #[test]
+    fn step_reply_tick_stamps_round_trip_and_default_to_zero() {
+        let with = StepReply {
+            frame: 9,
+            tick_start_mono_ns: 5_000_000_000,
+            tick_return_mono_ns: 5_001_200_000,
+            ..Default::default()
+        };
+        let back = StepReply::decode(with.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(
+            (back.tick_start_mono_ns, back.tick_return_mono_ns),
+            (5_000_000_000, 5_001_200_000)
+        );
+        let bare = StepReply::decode(
+            StepReply {
+                frame: 9,
+                ..Default::default()
+            }
+            .encode_to_vec()
+            .as_slice(),
+        )
+        .unwrap();
+        assert_eq!((bare.tick_start_mono_ns, bare.tick_return_mono_ns), (0, 0));
     }
 }

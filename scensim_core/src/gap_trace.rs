@@ -62,6 +62,10 @@ pub enum Record {
         npc_motion: &'static str,
         map: String,
         step_time: f64,
+        /// The world server host's boot id (`HelloReply.boot_id`): the frames' `tick_*_mono_ns`
+        /// compare only with times taken under it (scensim issue 135). Absent when unknown.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        world_boot_id: Option<String>,
     },
     Entity(EntityHeader),
     Frame {
@@ -90,6 +94,13 @@ pub enum Record {
         /// 092 K12); absent elsewhere.
         #[serde(skip_serializing_if = "Option::is_none")]
         commands: Option<CommandCounts>,
+        /// `CLOCK_MONOTONIC` on the world server just before and just after its tick that
+        /// produced this frame (`StepReply.tick_start_mono_ns`, `tick_return_mono_ns`; schema
+        /// 3, optional, scensim issue 135); absent when the server does not say.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tick_mono_ns: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tick_return_mono_ns: Option<i64>,
         entities: BTreeMap<String, EntityState>,
     },
     Contact {
@@ -339,6 +350,8 @@ struct Staged {
     entities: Vec<StagedEntity>,
     npc_logic_started: Option<bool>,
     commands: Option<CommandCounts>,
+    /// The world server's tick start and return, `CLOCK_MONOTONIC` ns (issue 135).
+    tick: Option<(i64, i64)>,
 }
 
 /// What the writer thread is told.
@@ -380,6 +393,8 @@ pub struct GapTrace {
     episode: Option<Episode>,
     /// Set after a warning about records arriving with no episode open.
     warned_closed: bool,
+    /// The world server host's boot id, for each episode line (issue 135).
+    world_boot_id: Option<String>,
 }
 
 impl GapTrace {
@@ -396,6 +411,7 @@ impl GapTrace {
             backlog: VecDeque::new(),
             episode: None,
             warned_closed: false,
+            world_boot_id: None,
         }
     }
 
@@ -409,6 +425,7 @@ impl GapTrace {
             backlog: VecDeque::new(),
             episode: None,
             warned_closed: false,
+            world_boot_id: None,
         }
     }
 
@@ -464,6 +481,7 @@ impl GapTrace {
             npc_motion,
             map: map.to_string(),
             step_time,
+            world_boot_id: self.world_boot_id.clone(),
         });
     }
 
@@ -495,6 +513,7 @@ impl GapTrace {
             entities,
             npc_logic_started: None,
             commands: None,
+            tick: None,
         });
     }
 
@@ -506,6 +525,24 @@ impl GapTrace {
         if let Some(staged) = self.episode.as_mut().and_then(|ep| ep.staged.as_mut()) {
             staged.commands = Some(counts);
         }
+    }
+
+    /// The world server's tick start and return for the step that completes the staged frame,
+    /// `CLOCK_MONOTONIC` ns (scensim issue 135): call before [`GapTrace::emit_staged_at`]; 0s
+    /// (a server that does not say) leave them out.
+    pub fn tick_times(&mut self, start_ns: i64, return_ns: i64) {
+        if start_ns == 0 && return_ns == 0 {
+            return;
+        }
+        if let Some(staged) = self.episode.as_mut().and_then(|ep| ep.staged.as_mut()) {
+            staged.tick = Some((start_ns, return_ns));
+        }
+    }
+
+    /// The world server host's boot id (`HelloReply.boot_id`), for the next episode's line
+    /// (scensim issue 135); empty for unknown.
+    pub fn world_boot_id(&mut self, id: &str) {
+        self.world_boot_id = (!id.is_empty()).then(|| id.to_string());
     }
 
     pub fn npc_logic(&mut self, frame: u64, started: bool) {
@@ -606,6 +643,8 @@ impl GapTrace {
             wall_ns,
             npc_logic_started: staged.npc_logic_started,
             commands: staged.commands,
+            tick_mono_ns: staged.tick.map(|t| t.0),
+            tick_return_mono_ns: staged.tick.map(|t| t.1),
             entities,
         };
         if self.try_frame(record.to_line()) {
@@ -993,6 +1032,7 @@ mod tests {
             npc_motion: "tracked",
             map: "Town01".into(),
             step_time: 0.05,
+            world_boot_id: None,
         };
         assert_eq!(
             parse(&r),
@@ -1000,6 +1040,17 @@ mod tests {
                    "start_unix": 1_760_000_000.25, "npc_motion": "tracked",
                    "map": "Town01", "step_time": 0.05})
         );
+        // with the world server's boot id (issue 135)
+        let r = Record::Episode {
+            schema: SCHEMA,
+            episode: 3,
+            start_unix: 1_760_000_000.25,
+            npc_motion: "tracked",
+            map: "Town01".into(),
+            step_time: 0.05,
+            world_boot_id: Some("0f3c".into()),
+        };
+        assert_eq!(parse(&r)["world_boot_id"], "0f3c");
     }
 
     #[test]
@@ -1082,6 +1133,8 @@ mod tests {
                 malformed: 0,
                 stale: 3,
             }),
+            tick_mono_ns: Some(5_000_000_000),
+            tick_return_mono_ns: Some(5_001_200_000),
             entities,
         };
         assert_eq!(
@@ -1090,7 +1143,8 @@ mod tests {
                 "sim_time_ns": 1_000_350_000_000_i64, "wall_ns": 351_000_000_i64,
                 "npc_logic_started": true,
                 "commands": {"unknown_entity": 1, "gate_misses": 2, "malformed": 0,
-                    "stale": 3}, "entities": {
+                    "stale": 3}, "tick_mono_ns": 5_000_000_000_i64,
+                "tick_return_mono_ns": 5_001_200_000_i64, "entities": {
                 "ego": {"ssv2": [1.0, 2.0, 0.0, 0.0, 0.0, 0.5],
                         "sim_pose": [1.1, 2.0, 0.03, 0.0, 0.0, 0.5], "velocity": [4.0, 0.0, 0.0],
                         "angular_velocity": [0.0, 0.0, 0.2], "velocity_source": "measured",
@@ -1316,6 +1370,31 @@ mod tests {
         assert!(!t.recording());
         assert!(!t.staged_due(5));
         assert!(t.tx.is_none() && t.writer.is_none());
+    }
+
+    #[test]
+    fn tick_times_ride_the_staged_frame_and_zeros_leave_them_out() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(100);
+        let mut t = GapTrace::with_channel(PathBuf::from("/nonexistent"), tx);
+        t.world_boot_id("6a1f0c2e-1b7d-4c55-9a43-0d2b8e9f1a77");
+        t.begin_episode(1, "tracked", 0.0, "Town01", 0.05);
+        t.entity(header("ego", Kind::Ego, 1));
+        t.stage_frame(1, vec![staged("ego", 1, 0.0, false)]);
+        t.tick_times(7_000_000_000, 7_000_900_000);
+        t.emit_staged(1, |_| None);
+        t.stage_frame(2, vec![staged("ego", 1, 0.0, false)]);
+        t.tick_times(0, 0); // a server that does not say
+        t.emit_staged(2, |_| None);
+        let v = lines(&rx);
+        assert_eq!(
+            v[0]["world_boot_id"],
+            "6a1f0c2e-1b7d-4c55-9a43-0d2b8e9f1a77"
+        );
+        let frames: Vec<&Value> = v.iter().filter(|l| l["type"] == "frame").collect();
+        assert_eq!(frames[0]["tick_mono_ns"], 7_000_000_000_i64);
+        assert_eq!(frames[0]["tick_return_mono_ns"], 7_000_900_000_i64);
+        assert!(frames[1].get("tick_mono_ns").is_none());
+        assert!(frames[1].get("tick_return_mono_ns").is_none());
     }
 
     /// The format is the Python reader's: write a trace through the real writer thread and

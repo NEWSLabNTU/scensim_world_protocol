@@ -150,6 +150,10 @@ message HelloReply {
   // Whether the server can load a world now (CARLA: connected to its server).
   bool ready = 8;
   string not_ready_reason = 9;
+  // The server host's boot id (/proc/sys/kernel/random/boot_id): StepReply's CLOCK_MONOTONIC
+  // times compare only with times taken under the same one (scensim issue 135). Empty from a
+  // server that does not say. Additive.
+  string boot_id = 10;
 }
 
 // Replace the world: every entity is gone after it, the clock goes on.
@@ -521,6 +525,13 @@ message StepReply {
   // A `COMMANDS` server's counts since its world's last load (scensim roadmap 092 K12, D7);
   // unset on a server without `COMMANDS`. Additive: a peer of the other version ignores it.
   CommandCounts command_counts = 8;
+  // CLOCK_MONOTONIC, ns, on the server just before its call to the simulator's tick that produced
+  // this reply's frame (the step's last substep), and when that call returned (scensim issue
+  // 135). The start stamp precedes the simulator's own start by up to the call's send latency.
+  // Comparable only with times taken on the same boot of the same host (HelloReply.boot_id);
+  // 0 from a server that does not say (Isaac). Additive.
+  int64 tick_start_mono_ns = 9;
+  int64 tick_return_mono_ns = 10;
 }
 
 // What a `COMMANDS` server could not apply, since its world's last load.
