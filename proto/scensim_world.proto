@@ -462,7 +462,8 @@ message AppliedControl {
   bool hand_brake = 4;
   bool reverse = 5;
   bool manual_gear_shift = 6;
-  // The gear it asks for (CARLA: 0 is automatic when manual_gear_shift is off).
+  // The gear: as held, so on CARLA under the automatic transmission (manual_gear_shift off) the
+  // gear engaged, not the 0 a pilot sends (seen 2026-11-24, scensim issue 135 step 2).
   int32 gear = 7;
 }
 
