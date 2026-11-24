@@ -46,7 +46,10 @@
 // capability. Nor does `GetSignals`: only `scensim_world_check` sends it. Nor does 092's
 // `EnvironmentReply`: only a server declaring `ENVIRONMENT_APPLIED` sends it, and the bridge
 // reads it only from one. Nor does 092 K12's `COMMANDED` motion: the bridge spawns one only on a
-// server declaring `COMMANDS`, and `ReadBack.cmd_frame` is a field an older peer ignores.)
+// server declaring `COMMANDS`, and `ReadBack.cmd_frame` is a field an older peer ignores. Nor do
+// 092 K9f-a's and 086 C7's `RoadConditionReply` and zones: only a server declaring
+// `ROAD_CONDITION_APPLIED` sends the reply, and the bridge reads it only from one; only one
+// declaring `ROAD_ZONES` fills its zones.)
 
 syntax = "proto3";
 
@@ -115,6 +118,16 @@ enum Capability {
   // commands, which reach it with its tick gate's acknowledgements, and reads each one back
   // with the frame its command answered (`ReadBack.cmd_frame`). Needs `READS_BACK`.
   CAPABILITY_COMMANDS = 12;
+  // `scensim.zone.<id>.<field>` properties in `SetRoadCondition` (092 K9f-a): the server applies
+  // each field to that zone of its map's surface record and lists every zone the condition named
+  // in `RoadConditionReply.zones`. Needs `ROAD_CONDITION_APPLIED`. A server without it is sent no
+  // `scensim.zone.` property by a check that knows; one that is sent one anyway refuses it, as
+  // before.
+  CAPABILITY_ROAD_ZONES = 13;
+  // `RoadConditionReply` to `SetRoadCondition` (092 K9f-a, 086 C7): the road state the world
+  // applies after it, read back from the simulator, for the world-wide part (and, with
+  // `ROAD_ZONES`, the zones). Needs `ROAD_CONDITION`.
+  CAPABILITY_ROAD_CONDITION_APPLIED = 14;
 }
 
 // Who sends a request: what the owner lease is checked against.
@@ -604,6 +617,33 @@ message SetRoadCondition {
   RoadCondition road_condition = 1;
 }
 
+// A zone's state as the server applies it after a `SetRoadCondition`.
+message ZoneApplied {
+  // The class of the table the zone now has (the condition's, else the map's).
+  string surface_class = 1;
+  // Its OpenSCENARIO wetness level (dry, moist, wetWithPuddles, lowFlooded, highFlooded).
+  string wetness = 2;
+  // Its water depth, m, when it has one (a ford); unset otherwise. A one-member oneof, not
+  // proto3 `optional`, which Jammy's protoc 3.12 refuses without an experimental flag: the same
+  // wire format and presence (Python `HasField("water_depth")`, prost `Option<zone_applied::Depth>`).
+  oneof depth {
+    double water_depth = 3;
+  }
+  // The friction coefficient its surface now gives a tyre: the class's mu times the wetness
+  // factor, times the condition's friction_scale_factor (the class table's numbers).
+  double mu = 4;
+}
+
+// A server with `ROAD_CONDITION_APPLIED` answers `SetRoadCondition` with the road state it now
+// applies, read from its own model (Isaac: the surface layer; CARLA: the cars' physics control),
+// for the world-wide part; with `ROAD_ZONES` also every zone the condition named (empty
+// otherwise). A zone the condition did not name is as the map has it and is not listed.
+message RoadConditionReply {
+  double friction_scale_factor = 1;
+  string wetness = 2;
+  map<string, ZoneApplied> zones = 3;
+}
+
 // SSv2's `UpdateEnvironment` weather and time of day (OpenSCENARIO `Weather`, `TimeOfDay`;
 // roadmap 047). Every part is optional: one not set leaves that part as it was. `LoadWorld` and
 // `Release` go back to the world's own sky and weather. A server refuses, with every problem
@@ -710,6 +750,7 @@ message Reply {
     WeatherReply weather = 8;
     SignalsReply signals = 10;
     EnvironmentReply environment = 11;
+    RoadConditionReply road_condition = 12;
   }
   // The server cannot go on (a hung simulator call, its simulator gone): it exits after this
   // reply, and the bridge ends as after a request that timed out.

@@ -111,6 +111,14 @@ class World:
         the scenario has set. Asked right after each `set_environment`."""
         raise NotImplementedError("this simulator has no weather read-back")
 
+    def applied_road_condition(self, zone_ids):
+        """`ROAD_CONDITION_APPLIED` (092 K9f-a, 086 C7): the road state the world applies now,
+        read back from the simulator: ``{"friction_scale_factor": float, "wetness": level,
+        "zones": {id: {"surface_class", "wetness", "water_depth" (None: none), "mu"}}}``, the
+        zones those of `zone_ids` (the ones the condition named; only with ``ROAD_ZONES``).
+        Asked right after each `set_road_condition`."""
+        raise NotImplementedError("this simulator has no road condition read-back")
+
     def set_weather(self, preset, parameters):
         """`WEATHER`: a preset by this simulator's name for it (non-empty: it wins), or
         `parameters` by name ({name: value}; those not named keep their values). Keep it, and

@@ -361,6 +361,44 @@ class ServerTest(unittest.TestCase):
         self.assertEqual((a.sun.azimuth, a.sun.elevation), (1.0, 0.2))
         self.assertFalse(a.HasField("precipitation"))
 
+    def test_a_world_with_the_road_read_back_answers_what_it_applies(self):
+        """092 K9f-a, 086 C7: ROAD_CONDITION_APPLIED answers SetRoadCondition with the world's
+        own road state, and the zones the condition named; a world without it answers ok
+        alone, as before."""
+        applied = {}
+
+        def set_road_condition(friction_scale, wetness, properties):
+            applied.update(scale=round(friction_scale * 20) / 20, wetness=wetness)  # 0.05 steps
+
+        def applied_road_condition(zone_ids):
+            return {"friction_scale_factor": applied["scale"], "wetness": applied["wetness"],
+                    "zones": {z: {"surface_class": "gravel", "wetness": "moist",
+                                  "water_depth": 0.2 if z == "ford" else None, "mu": 0.5}
+                              for z in zone_ids}}
+        self.world.set_road_condition = set_road_condition
+        self.world.applied_road_condition = applied_road_condition
+        rc = pb.RoadCondition(friction_scale_factor=0.83, wetness="moist")
+        self.world.capabilities = ("ROAD_CONDITION",)
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+        r = call(server, set_road_condition=pb.SetRoadCondition(road_condition=rc))
+        self.assertTrue(r.ok, r.error)
+        self.assertEqual(r.WhichOneof("reply"), None)
+        self.world.capabilities = ("ROAD_CONDITION", "ROAD_CONDITION_APPLIED", "ROAD_ZONES")
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+        rc.properties["scensim.zone.ford.class"] = "gravel"
+        rc.properties["scensim.zone.patch.wetness"] = "moist"
+        r = call(server, set_road_condition=pb.SetRoadCondition(road_condition=rc))
+        self.assertTrue(r.ok, r.error)
+        a = r.road_condition
+        self.assertAlmostEqual(a.friction_scale_factor, 0.85)
+        self.assertEqual(a.wetness, "moist")
+        self.assertEqual(sorted(a.zones), ["ford", "patch"])
+        self.assertTrue(a.zones["ford"].HasField("water_depth"))
+        self.assertAlmostEqual(a.zones["ford"].water_depth, 0.2)
+        self.assertFalse(a.zones["patch"].HasField("water_depth"))
+
     def test_signals_come_with_the_world_and_take_colours(self):
         hello(self.server)
         r = call(self.server, load_world=pb.LoadWorld(world="/maps/x.usd", signals=[

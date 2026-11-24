@@ -10,6 +10,7 @@ struct Fake {
     fail_step_fatally: bool,
     caps: Vec<wire::Capability>,
     fog: Option<f64>,
+    road: Option<(f64, String)>,
 }
 
 impl World for Fake {
@@ -64,6 +65,25 @@ impl World for Fake {
             self.fog = Some((f.visual_range / 10.0).round() * 10.0);
         }
         Ok(())
+    }
+    fn set_road_condition(&mut self, r: &wire::RoadCondition) -> WorldResult<()> {
+        // a world that holds the scale to the nearest 0.05
+        self.road = Some((
+            (r.friction_scale_factor / 0.05).round() * 0.05,
+            r.wetness.clone(),
+        ));
+        Ok(())
+    }
+    fn applied_road_condition(
+        &mut self,
+        _r: &wire::RoadCondition,
+    ) -> WorldResult<wire::RoadConditionReply> {
+        let (f, w) = self.road.clone().unwrap_or((1.0, String::new()));
+        Ok(wire::RoadConditionReply {
+            friction_scale_factor: f,
+            wetness: w,
+            zones: Default::default(),
+        })
     }
     fn applied_environment(&mut self) -> WorldResult<wire::ScenarioWeather> {
         Ok(wire::ScenarioWeather {
@@ -358,6 +378,39 @@ fn set_environment_answers_what_the_world_shows_when_it_offers_the_read_back() {
     match r.reply {
         Some(wire::reply::Reply::Environment(e)) => {
             assert_eq!(e.applied.unwrap().fog.unwrap().visual_range, 120.0)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn set_road_condition_answers_what_the_world_applies_when_it_offers_the_read_back() {
+    let rc = |f: f64| {
+        wire::request::Request::SetRoadCondition(wire::SetRoadCondition {
+            road_condition: Some(wire::RoadCondition {
+                friction_scale_factor: f,
+                wetness: "moist".into(),
+                ..Default::default()
+            }),
+        })
+    };
+    // ROAD_CONDITION alone: applied, no read-back (as before 092 K9f-a and 086 C7)
+    let mut s = shell(vec![wire::Capability::RoadCondition]);
+    hello(&mut s, 1, false);
+    let r = call(&mut s, 1, rc(0.83));
+    assert!(r.ok && r.reply.is_none(), "{r:?}");
+    // with ROAD_CONDITION_APPLIED: the world's own value, not the one asked for
+    let mut s = shell(vec![
+        wire::Capability::RoadCondition,
+        wire::Capability::RoadConditionApplied,
+    ]);
+    hello(&mut s, 1, false);
+    let r = call(&mut s, 1, rc(0.83));
+    match r.reply {
+        Some(wire::reply::Reply::RoadCondition(a)) => {
+            assert!((a.friction_scale_factor - 0.85).abs() < 1e-9, "{a:?}");
+            assert_eq!(a.wetness, "moist");
+            assert!(a.zones.is_empty());
         }
         other => panic!("{other:?}"),
     }

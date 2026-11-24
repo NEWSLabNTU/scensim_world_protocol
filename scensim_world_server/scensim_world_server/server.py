@@ -421,6 +421,21 @@ class WorldServer:
                                           dict(rc.properties))
         except ValueError as e:
             raise RequestError(f"RoadCondition refused:\n{e}") from e
+        if self.offers("ROAD_CONDITION_APPLIED"):
+            # 092 K9f-a, 086 C7: the road state the world applies now, read back
+            a = self.world.applied_road_condition(
+                [n.split(".")[2] for n in rc.properties
+                 if n.startswith("scensim.zone.") and len(n.split(".")) > 3])
+            zones = {}
+            for zid, z in (a.get("zones") or {}).items():
+                za = pb.ZoneApplied(surface_class=z["surface_class"], wetness=z["wetness"],
+                                    mu=float(z["mu"]))
+                if z.get("water_depth") is not None:
+                    za.water_depth = float(z["water_depth"])
+                zones[zid] = za
+            return pb.Reply(ok=True, road_condition=pb.RoadConditionReply(
+                friction_scale_factor=float(a["friction_scale_factor"]), wetness=a["wetness"],
+                zones=zones))
         return pb.Reply(ok=True)
 
     def _set_environment(self, req):

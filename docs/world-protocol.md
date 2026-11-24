@@ -102,6 +102,8 @@ shells do this for you).
 | `ROAD_CONDITION` | OpenSCENARIO's road condition, world-wide and per zone | `SetRoadCondition` |
 | `ENVIRONMENT` | OpenSCENARIO's weather and time of day | `SetEnvironment` |
 | `ENVIRONMENT_APPLIED` | reads the weather back after each `SetEnvironment` | `EnvironmentReply` |
+| `ROAD_ZONES` | applies `scensim.zone.<id>.<field>` to its map's surface record and lists every named zone in the reply; needs `ROAD_CONDITION_APPLIED` | `RoadConditionReply.zones` |
+| `ROAD_CONDITION_APPLIED` | reads the road state back after each `SetRoadCondition`; needs `ROAD_CONDITION` | `RoadConditionReply` |
 | `COMMANDS` | moves `COMMANDED` bodies by a behaviour model's kinematic commands, which reach it with its tick gate's acknowledgements, and reads each back with the frame its command answered; needs `READS_BACK` | `Motion.COMMANDED`; `ReadBack.cmd_frame`, `EntityState.cmd_frame`, `StepReply.command_counts` |
 
 A `Spawn` with `motion: TRACKED` needs `TRACKED_MOTION` or `TRACKS_TARGETS`; `AUTOPILOT`
@@ -268,6 +270,15 @@ OpenSCENARIO's levels (empty: dry); `properties` holds only `scensim.` propertie
 `scensim.zone.<id>.<field>` sets a field of a zone of the map's `surfaces.yaml`. A server refuses
 a property it does not know or cannot apply, listing every problem (a zone it does not have
 by its id), and then changes nothing. `LoadWorld` and `Release` go back to the default.
+
+A server with `ROAD_CONDITION_APPLIED` answers with `RoadConditionReply { friction_scale_factor,
+wetness, zones }`: the road state it applies now, read back from its own model, for the
+world-wide part; with `ROAD_ZONES` also every zone the condition named (`ZoneApplied`: its class,
+wetness, water depth when it has one, and mu, the class's mu times the wetness factor times the
+scale), empty otherwise (scensim roadmap 092 K9f-a, 086 C7). A zone the condition did not name is
+as the map has it and is not listed. CARLA 0.9.16 offers the read-back without zones (086 C7:
+its friction trigger reaches every car of a blueprint, and a per-wheel physics apply steps the
+car); Isaac offers both.
 
 ### SetEnvironment (`ENVIRONMENT`)
 

@@ -121,6 +121,18 @@ pub trait World {
             "the weather's read-back is not offered by this server",
         ))
     }
+    /// `ROAD_CONDITION_APPLIED`: the road state the world applies now, read back from the
+    /// simulator, for the world-wide part and (with `ROAD_ZONES`) every zone `request` named
+    /// (092 K9f-a, 086 C7). Asked right after each `set_road_condition` by a server declaring
+    /// the capability.
+    fn applied_road_condition(
+        &mut self,
+        _request: &wire::RoadCondition,
+    ) -> WorldResult<wire::RoadConditionReply> {
+        Err(Refusal::new(
+            "the road condition's read-back is not offered by this server",
+        ))
+    }
     /// A new owner: every entity of the last one goes (`handles`); the world stays.
     fn reset(&mut self, handles: &[u32]) -> WorldResult<()> {
         for h in handles {
@@ -522,7 +534,12 @@ impl<W: World> Shell<W> {
                     )));
                 }
                 self.world.set_road_condition(&rc)?;
-                ok(None)
+                if self.offers(wire::Capability::RoadConditionApplied) {
+                    let applied = self.world.applied_road_condition(&rc)?;
+                    ok(Some(R::RoadCondition(applied)))
+                } else {
+                    ok(None)
+                }
             }
             Q::SetEnvironment(req) => {
                 self.need(
