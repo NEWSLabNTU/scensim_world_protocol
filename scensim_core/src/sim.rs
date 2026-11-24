@@ -72,6 +72,9 @@ pub enum Driver {
     SimulatorAutopilot,
     /// Controller `agent`: the autopilot registered under the entity's name drives it.
     Agent,
+    /// Controller `model` ([`MODEL_BEHAVIOR`]): a behaviour model commands it and the world
+    /// server integrates the commands (Motion COMMANDED, scensim roadmap 092 K13).
+    Model,
 }
 
 impl Driver {
@@ -84,6 +87,8 @@ impl Driver {
             Self::SimulatorAutopilot
         } else if behavior == crate::agent_link::BEHAVIOR {
             Self::Agent
+        } else if behavior == MODEL_BEHAVIOR {
+            Self::Model
         } else {
             Self::Scenario
         }
@@ -111,7 +116,8 @@ pub enum EntityKind {
     MiscObject,
 }
 
-/// The controller name of an entity a behaviour model commands (scensim roadmap 092 K12).
+/// The controller name of an entity a behaviour model commands (scensim roadmap 092 K12:
+/// pedestrians; K13: vehicles too).
 pub const MODEL_BEHAVIOR: &str = "model";
 
 /// A vehicle's wheels in its entity frame (x forward from the entity origin, which for SSv2 is
@@ -362,6 +368,9 @@ mod tests {
             Driver::of_vehicle(false, crate::agent_link::BEHAVIOR),
             Driver::Agent
         );
+        assert_eq!(Driver::of_vehicle(false, MODEL_BEHAVIOR), Driver::Model);
+        // the ego is never a model's
+        assert_eq!(Driver::of_vehicle(true, MODEL_BEHAVIOR), Driver::Ego);
         assert_eq!(Driver::of_vehicle(false, ""), Driver::Scenario);
         assert_eq!(
             Driver::of_vehicle(false, "behavior_tree_plugin/VehicleBehaviorTree"),

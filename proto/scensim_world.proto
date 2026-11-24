@@ -250,7 +250,8 @@ enum Motion {
   AUTOPILOT = 3;
   // A behaviour model's kinematic commands move it (`COMMANDS`, 092 K12): the server integrates
   // each command (speed toward the commanded speed within its acceleration limit, then along
-  // the heading) and poses the body kinematically. Read back, never posed.
+  // the heading) and poses the body kinematically. Read back, never posed. A pedestrian, or
+  // (092 K13) a vehicle.
   COMMANDED = 4;
 }
 
