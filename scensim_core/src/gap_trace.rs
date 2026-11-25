@@ -40,9 +40,11 @@ use crate::contact_report::{self, RawCollision};
 /// named them after CARLA, and adds the entity's `index`, `role` and `subtype`, `sim_time_ns`,
 /// `angular_velocity`, `velocity_source`, the episode's `map` and `step_time`, and `signal`
 /// lines. Schema 3 adds a commanded entity's `cmd_frame` (scensim roadmap 092 K12) and, optional
-/// within it, a physics vehicle's applied `control` (scensim issue 135). Readers read each file
-/// by its schema.
-pub const SCHEMA: u32 = 3;
+/// within it, a physics vehicle's applied `control` (scensim issue 135). Schema 4 adds the
+/// `road_condition` line (scensim roadmap 092 K9f-a): a reader's record types are a closed set
+/// per schema, so a new record type is a new schema, and a reader from before refuses the file
+/// by its number. Readers read each file by its schema.
+pub const SCHEMA: u32 = 4;
 
 /// Lines the writer channel holds: about 25 s of frames at 20 Hz with a few entities, so
 /// only a disk stalled for that long drops a frame.
@@ -50,6 +52,34 @@ pub const CHANNEL_LINES: usize = 512;
 
 /// A pose in the ROS map frame: `[x, y, z, roll, pitch, yaw]`, m and rad.
 pub type Pose6 = [f64; 6];
+
+/// A `road_condition` line's `sent` (schema 4): the condition as the bridge sent it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RoadConditionSent {
+    pub friction_scale_factor: f64,
+    pub wetness: String,
+    /// The `scensim.*` properties, by name.
+    pub properties: BTreeMap<String, String>,
+}
+
+/// A `road_condition` line's `applied` (schema 4): the world's read-back (`RoadConditionReply`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RoadConditionApplied {
+    pub friction_scale_factor: f64,
+    pub wetness: String,
+    /// The zones the condition named (`ROAD_ZONES`), by id; empty otherwise.
+    pub zones: BTreeMap<String, ZoneApplied>,
+}
+
+/// One zone's applied road state (`ZoneApplied`): its class, wetness, water depth (null: none
+/// of its own) and mu (the class's mu times its wet factor times the scale).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ZoneApplied {
+    pub surface_class: String,
+    pub wetness: String,
+    pub water_depth: Option<f64>,
+    pub mu: f64,
+}
 
 /// One record of the trace, serialized exactly as the schema names it.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -139,6 +169,20 @@ pub enum Record {
         commanded: f64,
         applied: Option<f64>,
         sent: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        after_step: bool,
+    },
+    /// A road condition the bridge sent, and what the world applies after it (scensim roadmap 092
+    /// K9f-a, schema 4): `sent` as sent, `applied` the world's read-back (`ROAD_CONDITION_APPLIED`;
+    /// null from a server without it), `after_step` when that read-back was taken after a step's
+    /// tick (`READBACK_AFTER_STEP`; absent otherwise). One line per send that has a read-back,
+    /// and one more when the step after it brings the read-back after the tick.
+    #[serde(rename = "road_condition")]
+    RoadCondition {
+        frame: u64,
+        sim_time_ns: i64,
+        sent: RoadConditionSent,
+        applied: Option<RoadConditionApplied>,
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         after_step: bool,
     },
@@ -748,6 +792,28 @@ impl GapTrace {
         });
     }
 
+    /// A road condition sent at SSv2 frame `frame` and the world's read-back of it (see
+    /// `Record::RoadCondition`).
+    pub fn road_condition(
+        &mut self,
+        frame: u64,
+        sim_time_ns: i64,
+        sent: RoadConditionSent,
+        applied: Option<RoadConditionApplied>,
+        after_step: bool,
+    ) {
+        if self.open_episode().is_none() {
+            return;
+        }
+        self.push_line(Record::RoadCondition {
+            frame,
+            sim_time_ns,
+            sent,
+            applied,
+            after_step,
+        });
+    }
+
     /// CARLA restarted: contacts after this point were not seen.
     pub fn mark_incomplete(&mut self) {
         if let Some(ep) = self.episode.as_mut() {
@@ -1044,7 +1110,7 @@ mod tests {
         };
         assert_eq!(
             parse(&r),
-            json!({"type": "episode", "schema": 3, "episode": 3,
+            json!({"type": "episode", "schema": 4, "episode": 3,
                    "start_unix": 1_760_000_000.25, "npc_motion": "tracked",
                    "map": "Town01", "step_time": 0.05})
         );
@@ -1294,6 +1360,34 @@ mod tests {
         );
         // issue 161: a read-back after the step is marked; the mark is absent when false
         t.knob(2, 1_000_100_000_000, "fog", 500.0, Some(500.0), false, true);
+        // 092 K9f-a (schema 4): a road condition sent and read back, then after the step
+        let sent = RoadConditionSent {
+            friction_scale_factor: 1.0,
+            wetness: "dry".into(),
+            properties: [("scensim.zone.goal.class".to_string(), "ice".to_string())].into(),
+        };
+        let applied = RoadConditionApplied {
+            friction_scale_factor: 1.0,
+            wetness: "dry".into(),
+            zones: [(
+                "goal".to_string(),
+                ZoneApplied {
+                    surface_class: "ice".into(),
+                    wetness: "dry".into(),
+                    water_depth: None,
+                    mu: 0.265,
+                },
+            )]
+            .into(),
+        };
+        t.road_condition(
+            2,
+            1_000_100_000_000,
+            sent.clone(),
+            Some(applied.clone()),
+            false,
+        );
+        t.road_condition(2, 1_000_100_000_000, sent, Some(applied), true);
         // Staged but never ticked: replaced, then left at the end.
         t.stage_frame(3, vec![]);
         t.end_episode();
@@ -1303,8 +1397,20 @@ mod tests {
         assert_eq!(
             types,
             [
-                "episode", "entity", "entity", "frame", "contact", "contact", "contact", "frame",
-                "signal", "knob", "knob", "end"
+                "episode",
+                "entity",
+                "entity",
+                "frame",
+                "contact",
+                "contact",
+                "contact",
+                "frame",
+                "signal",
+                "knob",
+                "knob",
+                "road_condition",
+                "road_condition",
+                "end"
             ]
         );
         assert_eq!(
@@ -1319,6 +1425,16 @@ mod tests {
                    "knob": "fog", "commanded": 500.0, "applied": 500.0, "sent": false,
                    "after_step": true})
         );
+        assert_eq!(
+            v[11],
+            json!({"type": "road_condition", "frame": 2, "sim_time_ns": 1_000_100_000_000_i64,
+                   "sent": {"friction_scale_factor": 1.0, "wetness": "dry",
+                            "properties": {"scensim.zone.goal.class": "ice"}},
+                   "applied": {"friction_scale_factor": 1.0, "wetness": "dry",
+                               "zones": {"goal": {"surface_class": "ice", "wetness": "dry",
+                                                  "water_depth": null, "mu": 0.265}}}})
+        );
+        assert_eq!(v[12]["after_step"], true);
         // Slots in header order.
         assert_eq!(v[1]["index"], 0);
         assert_eq!(v[2]["index"], 1);
@@ -1352,7 +1468,7 @@ mod tests {
             json!(["contact_hold", "kinematic"])
         );
         assert_eq!(
-            v[11],
+            v[13],
             json!({"type": "end", "frame": 2, "sim_time": 0.1, "frames": 2,
                                 "dropped_frames": 0, "complete": true})
         );
@@ -1494,7 +1610,7 @@ sys.path.insert(0, sys.argv[1])
 import gap_trace
 t = gap_trace.load_trace(sys.argv[2])
 assert t.episode.episode == 2 and t.episode.npc_motion == "tracked", t.episode
-assert t.episode.schema == 3 and t.episode.map == "field" and t.episode.step_time == 0.05
+assert t.episode.schema == 4 and t.episode.map == "field" and t.episode.step_time == 0.05
 assert sorted(t.entities) == ["barrier", "ego"], t.entities
 assert t.entities["barrier"].asset_box is None
 assert t.entities["ego"].index == 0 and t.entities["barrier"].index == 1
