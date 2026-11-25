@@ -129,6 +129,9 @@ pub enum Record {
     /// (`commanded`), what the world last read back (`applied`; null before the first read-back
     /// or from a server without one), and whether the bridge sent it this frame (`sent`: it
     /// moved by the profile's step since the last send). One line per profile knob per frame.
+    /// `after_step` (scensim issue 161; additive, schema 3): `applied` was read back after a
+    /// step's tick (`READBACK_AFTER_STEP`), not only right after the send; written only when
+    /// true, so a reader that does not know it reads the line as before.
     Knob {
         frame: u64,
         sim_time_ns: i64,
@@ -136,6 +139,8 @@ pub enum Record {
         commanded: f64,
         applied: Option<f64>,
         sent: bool,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        after_step: bool,
     },
     End {
         frame: u64,
@@ -718,6 +723,7 @@ impl GapTrace {
     }
 
     /// A knob profile's value at SSv2 frame `frame` (see `Record::Knob`).
+    #[allow(clippy::too_many_arguments)]
     pub fn knob(
         &mut self,
         frame: u64,
@@ -726,6 +732,7 @@ impl GapTrace {
         commanded: f64,
         applied: Option<f64>,
         sent: bool,
+        after_step: bool,
     ) {
         if self.open_episode().is_none() {
             return;
@@ -737,6 +744,7 @@ impl GapTrace {
             commanded,
             applied,
             sent,
+            after_step,
         });
     }
 
@@ -1275,7 +1283,17 @@ mod tests {
             Some(sim(0.0, 0.0, false))
         });
         t.signal(2, 1_000_100_000_000, "12", "green");
-        t.knob(2, 1_000_100_000_000, "visibility", 840.0, Some(838.0), true);
+        t.knob(
+            2,
+            1_000_100_000_000,
+            "visibility",
+            840.0,
+            Some(838.0),
+            true,
+            false,
+        );
+        // issue 161: a read-back after the step is marked; the mark is absent when false
+        t.knob(2, 1_000_100_000_000, "fog", 500.0, Some(500.0), false, true);
         // Staged but never ticked: replaced, then left at the end.
         t.stage_frame(3, vec![]);
         t.end_episode();
@@ -1286,13 +1304,20 @@ mod tests {
             types,
             [
                 "episode", "entity", "entity", "frame", "contact", "contact", "contact", "frame",
-                "signal", "knob", "end"
+                "signal", "knob", "knob", "end"
             ]
         );
         assert_eq!(
             v[9],
             json!({"type": "knob", "frame": 2, "sim_time_ns": 1_000_100_000_000_i64,
                    "knob": "visibility", "commanded": 840.0, "applied": 838.0, "sent": true})
+        );
+        assert!(v[9].get("after_step").is_none(), "{}", v[9]);
+        assert_eq!(
+            v[10],
+            json!({"type": "knob", "frame": 2, "sim_time_ns": 1_000_100_000_000_i64,
+                   "knob": "fog", "commanded": 500.0, "applied": 500.0, "sent": false,
+                   "after_step": true})
         );
         // Slots in header order.
         assert_eq!(v[1]["index"], 0);
@@ -1327,7 +1352,7 @@ mod tests {
             json!(["contact_hold", "kinematic"])
         );
         assert_eq!(
-            v[10],
+            v[11],
             json!({"type": "end", "frame": 2, "sim_time": 0.1, "frames": 2,
                                 "dropped_frames": 0, "complete": true})
         );
