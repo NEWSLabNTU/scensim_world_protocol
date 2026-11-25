@@ -11,6 +11,11 @@ struct Fake {
     caps: Vec<wire::Capability>,
     fog: Option<f64>,
     road: Option<(f64, String)>,
+    /// A world that shows what it was sent only after its next tick (CARLA 0.9.16's weather,
+    /// scensim issue 161): the fog sent, waiting for the tick.
+    lag: bool,
+    fog_at_tick: Option<f64>,
+    steps: u32,
 }
 
 impl World for Fake {
@@ -45,6 +50,10 @@ impl World for Fake {
         if self.fail_step_fatally {
             return Err(Refusal::fatal("the tick never returned"));
         }
+        self.steps += 1;
+        if let Some(f) = self.fog_at_tick.take() {
+            self.fog = Some(f);
+        }
         Ok(wire::StepReply {
             frame: 1,
             ..Default::default()
@@ -62,7 +71,12 @@ impl World for Fake {
     fn set_environment(&mut self, r: &wire::SetEnvironment) -> WorldResult<()> {
         if let Some(f) = r.weather.as_ref().and_then(|w| w.fog) {
             // a world that shows fog only to the nearest 10 m
-            self.fog = Some((f.visual_range / 10.0).round() * 10.0);
+            let shown = (f.visual_range / 10.0).round() * 10.0;
+            if self.lag {
+                self.fog_at_tick = Some(shown);
+            } else {
+                self.fog = Some(shown);
+            }
         }
         Ok(())
     }
@@ -423,4 +437,205 @@ fn boot_id_is_this_hosts_uuid() {
     assert_eq!(id.len(), 36, "{id}");
     assert_eq!(id.matches('-').count(), 4, "{id}");
     assert_eq!(id, super::boot_id());
+}
+
+fn environment(w: wire::ScenarioWeather) -> wire::request::Request {
+    wire::request::Request::SetEnvironment(wire::SetEnvironment {
+        weather: Some(w),
+        time_of_day: None,
+    })
+}
+
+fn sun(azimuth: f64, elevation: f64) -> wire::ScenarioWeather {
+    wire::ScenarioWeather {
+        sun: Some(wire::scenario_weather::Sun {
+            azimuth,
+            elevation,
+            illuminance: 0.0,
+        }),
+        ..Default::default()
+    }
+}
+
+fn fog_of(v: f64) -> wire::ScenarioWeather {
+    wire::ScenarioWeather {
+        fog: Some(wire::scenario_weather::Fog { visual_range: v }),
+        ..Default::default()
+    }
+}
+
+fn step(shell: &mut Shell<Fake>) -> wire::StepReply {
+    match call(
+        shell,
+        1,
+        wire::request::Request::Step(wire::Step::default()),
+    )
+    .reply
+    {
+        Some(wire::reply::Reply::Step(r)) => r,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Issue 161: a value outside its field's range refuses the whole request, by field, value and
+/// range with their unit, and the world is not called.
+#[test]
+fn issue_161_out_of_range_environment_values_are_refused_by_name_with_the_unit() {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let cases: Vec<(wire::ScenarioWeather, &str)> = vec![
+        (
+            sun(0.0, 1.6),
+            "sun_elevation 1.6 rad is outside [-1.5708, 1.5708] rad",
+        ),
+        (sun(0.0, -1.6), "sun_elevation -1.6 rad"),
+        (
+            sun(-0.1, 0.0),
+            "sun_azimuth -0.1 rad is outside [0, 6.2832) rad",
+        ),
+        (sun(2.0 * PI, 0.0), "sun_azimuth 6.28"),
+        (sun(f64::NAN, 0.0), "sun_azimuth NaN rad"),
+        (
+            fog_of(0.0),
+            "fog_visual_range 0 m is outside its range, above 0 m",
+        ),
+        (fog_of(f64::NAN), "fog_visual_range NaN m"),
+        (
+            wire::ScenarioWeather {
+                cloud_cover: Some(wire::scenario_weather::CloudCover { oktas: 10 }),
+                ..Default::default()
+            },
+            "cloud_cover 10 oktas is outside 0 to 9 oktas",
+        ),
+        (
+            wire::ScenarioWeather {
+                precipitation: Some(wire::scenario_weather::Precipitation {
+                    r#type: wire::scenario_weather::PrecipitationType::Rain as i32,
+                    intensity: -1.0,
+                }),
+                ..Default::default()
+            },
+            "precipitation_intensity -1 mm/h is outside its range, 0 or more mm/h",
+        ),
+    ];
+    for (w, says) in cases {
+        let mut s = shell(vec![
+            wire::Capability::Environment,
+            wire::Capability::EnvironmentApplied,
+        ]);
+        hello(&mut s, 1, false);
+        // a fog that is in range rides along and is not applied either
+        let mut w = w;
+        if w.fog.is_none() {
+            w.fog = Some(wire::scenario_weather::Fog {
+                visual_range: 500.0,
+            });
+        }
+        let r = call(&mut s, 1, environment(w));
+        assert!(!r.ok, "{r:?}");
+        assert!(r.error.contains(says), "{} / {says}", r.error);
+        assert!(r.error.contains("nothing changed"), "{}", r.error);
+        assert_eq!(s.world.fog, None, "applied though refused");
+    }
+    // the bounds themselves are in range
+    for w in [
+        sun(0.0, FRAC_PI_2),
+        sun(0.0, -FRAC_PI_2),
+        sun(0.0, 0.0),
+        fog_of(0.1),
+        wire::ScenarioWeather {
+            cloud_cover: Some(wire::scenario_weather::CloudCover { oktas: 9 }),
+            precipitation: Some(wire::scenario_weather::Precipitation {
+                r#type: wire::scenario_weather::PrecipitationType::Dry as i32,
+                intensity: 0.0,
+            }),
+            ..Default::default()
+        },
+    ] {
+        let mut s = shell(vec![wire::Capability::Environment]);
+        hello(&mut s, 1, false);
+        let r = call(&mut s, 1, environment(w));
+        assert!(r.ok, "{r:?}");
+    }
+}
+
+/// Issue 161, the K9e case (133): 60 meant as degrees, sent as an elevation in radians, is
+/// refused, the message saying rad and what 60 deg would have been.
+#[test]
+fn issue_161_k9e_60_sent_as_radians_is_refused_saying_the_units() {
+    let mut s = shell(vec![wire::Capability::Environment]);
+    hello(&mut s, 1, false);
+    let r = call(&mut s, 1, environment(sun(0.0, 60.0)));
+    assert!(!r.ok);
+    assert!(
+        r.error.contains(
+            "sun_elevation 60 rad is outside [-1.5708, 1.5708] rad (60 deg would be 1.0472 rad)"
+        ),
+        "{}",
+        r.error
+    );
+    let r = call(&mut s, 1, environment(sun(0.0, 60f64.to_radians())));
+    assert!(r.ok, "{r:?}");
+}
+
+/// Issue 161: with READBACK_AFTER_STEP the first step after a send carries the read-back taken
+/// after the tick; the send's own reply may predate it (a world that shows it only after a tick).
+#[test]
+fn issue_161_the_step_after_a_send_carries_the_read_back_after_its_tick() {
+    let mut s = shell(vec![
+        wire::Capability::Environment,
+        wire::Capability::EnvironmentApplied,
+        wire::Capability::ReadbackAfterStep,
+    ]);
+    s.world.lag = true;
+    hello(&mut s, 1, false);
+    let r = call(&mut s, 1, environment(fog_of(123.0)));
+    match r.reply {
+        // before the tick: the world still shows no fog
+        Some(wire::reply::Reply::Environment(e)) => assert_eq!(e.applied.unwrap().fog, None),
+        other => panic!("{other:?}"),
+    }
+    let r = step(&mut s);
+    assert_eq!(
+        r.environment_applied.unwrap().fog.unwrap().visual_range,
+        120.0
+    );
+    assert!(r.road_condition_applied.is_none());
+    // a step with no send carries none
+    assert!(step(&mut s).environment_applied.is_none());
+    // without the bit, no step carries one
+    let mut s = shell(vec![
+        wire::Capability::Environment,
+        wire::Capability::EnvironmentApplied,
+    ]);
+    hello(&mut s, 1, false);
+    assert!(call(&mut s, 1, environment(fog_of(123.0))).ok);
+    assert!(step(&mut s).environment_applied.is_none());
+}
+
+/// Issue 161: the road condition's read-back after the step, the same way.
+#[test]
+fn issue_161_the_step_after_a_road_condition_carries_its_read_back() {
+    let mut s = shell(vec![
+        wire::Capability::RoadCondition,
+        wire::Capability::RoadConditionApplied,
+        wire::Capability::ReadbackAfterStep,
+    ]);
+    hello(&mut s, 1, false);
+    let r = call(
+        &mut s,
+        1,
+        wire::request::Request::SetRoadCondition(wire::SetRoadCondition {
+            road_condition: Some(wire::RoadCondition {
+                friction_scale_factor: 0.83,
+                wetness: "moist".into(),
+                ..Default::default()
+            }),
+        }),
+    );
+    assert!(r.ok, "{r:?}");
+    let r = step(&mut s);
+    let a = r.road_condition_applied.unwrap();
+    assert!((a.friction_scale_factor - 0.85).abs() < 1e-9, "{a:?}");
+    assert!(r.environment_applied.is_none());
+    assert!(step(&mut s).road_condition_applied.is_none());
 }

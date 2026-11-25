@@ -10,6 +10,7 @@ The shell owns the protocol so a `World` does not have to: the version check, th
 against the declared capabilities, the drives an `Apply` hands the next `Step`, the clock.
 """
 import logging
+import math
 import os
 import signal
 import time
@@ -131,6 +132,10 @@ class WorldServer:
         self.sim_time = 0.0
         self.frame = 0
         self.episode_id = 0  # 0 until the first LoadWorld (roadmap 051)
+        # READBACK_AFTER_STEP (scensim issue 161): a SetEnvironment since the last step, and
+        # the zone ids of a SetRoadCondition since it (None: none sent)
+        self.environment_sent = False
+        self.road_condition_sent = None
         self.loaded_world = None
         self.stopped = False
         self.step_ms = []  # wall time of each step since the last summary (038)
@@ -356,7 +361,19 @@ class WorldServer:
                 state.command.CopyFrom(pb.TakenCommand(**command))
         for handle, other, path, impulse in contacts:
             reply.contacts.add(handle=handle, other=other, other_path=path, impulse=impulse)
+        self._read_back_after_step(reply)
         return pb.Reply(ok=True, step=reply)
+
+    def _read_back_after_step(self, reply):
+        """READBACK_AFTER_STEP (scensim issue 161): into a step's reply, after the world's
+        step, the read-back of a SetEnvironment or SetRoadCondition sent since the last one."""
+        zone_ids, self.road_condition_sent = self.road_condition_sent, None
+        sent, self.environment_sent = self.environment_sent, False
+        if zone_ids is not None and self.offers("ROAD_CONDITION_APPLIED"):
+            reply.road_condition_applied.CopyFrom(self._road_condition_reply(zone_ids))
+        if sent and self.offers("ENVIRONMENT_APPLIED"):
+            reply.environment_applied.CopyFrom(
+                scenario_weather(self.world.applied_environment()))
 
     def _set_step_time(self, _req):
         return pb.Reply(ok=True)
@@ -421,26 +438,34 @@ class WorldServer:
                                           dict(rc.properties))
         except ValueError as e:
             raise RequestError(f"RoadCondition refused:\n{e}") from e
+        zone_ids = [n.split(".")[2] for n in rc.properties
+                    if n.startswith("scensim.zone.") and len(n.split(".")) > 3]
+        if self.offers("READBACK_AFTER_STEP"):
+            self.road_condition_sent = zone_ids
         if self.offers("ROAD_CONDITION_APPLIED"):
             # 092 K9f-a, 086 C7: the road state the world applies now, read back
-            a = self.world.applied_road_condition(
-                [n.split(".")[2] for n in rc.properties
-                 if n.startswith("scensim.zone.") and len(n.split(".")) > 3])
-            zones = {}
-            for zid, z in (a.get("zones") or {}).items():
-                za = pb.ZoneApplied(surface_class=z["surface_class"], wetness=z["wetness"],
-                                    mu=float(z["mu"]))
-                if z.get("water_depth") is not None:
-                    za.water_depth = float(z["water_depth"])
-                zones[zid] = za
-            return pb.Reply(ok=True, road_condition=pb.RoadConditionReply(
-                friction_scale_factor=float(a["friction_scale_factor"]), wetness=a["wetness"],
-                zones=zones))
+            return pb.Reply(ok=True, road_condition=self._road_condition_reply(zone_ids))
         return pb.Reply(ok=True)
+
+    def _road_condition_reply(self, zone_ids):
+        a = self.world.applied_road_condition(zone_ids)
+        zones = {}
+        for zid, z in (a.get("zones") or {}).items():
+            za = pb.ZoneApplied(surface_class=z["surface_class"], wetness=z["wetness"],
+                                mu=float(z["mu"]))
+            if z.get("water_depth") is not None:
+                za.water_depth = float(z["water_depth"])
+            zones[zid] = za
+        return pb.RoadConditionReply(
+            friction_scale_factor=float(a["friction_scale_factor"]), wetness=a["wetness"],
+            zones=zones)
 
     def _set_environment(self, req):
         if not self.offers("ENVIRONMENT"):
             raise RequestError("the weather and time of day are not offered by this server")
+        problems = environment_range_problems(req.weather) if req.HasField("weather") else []
+        if problems:
+            raise RequestError("SetEnvironment refused, nothing changed:\n" + "\n".join(problems))
         weather = environment_weather(req.weather) if req.HasField("weather") else None
         time_of_day = None
         if req.HasField("time_of_day"):
@@ -451,6 +476,8 @@ class WorldServer:
             self.world.set_environment(weather, time_of_day, self.sim_time)
         except ValueError as e:
             raise RequestError(f"Weather refused:\n{e}") from e
+        if self.offers("READBACK_AFTER_STEP"):
+            self.environment_sent = True
         if self.offers("ENVIRONMENT_APPLIED"):
             # 092 K9: what the world shows now, read back, for a knob profile's record
             return pb.Reply(ok=True, environment=pb.EnvironmentReply(
@@ -460,6 +487,41 @@ class WorldServer:
     def _shutdown(self, _req):
         self.stopped = True
         return pb.Reply(ok=True)
+
+
+def _num(v):
+    """A number as the Rust shell writes it (`{}` of an f64): 60, 1.6, NaN."""
+    if math.isnan(v):
+        return "NaN"
+    return f"{v:.0f}" if float(v).is_integer() else repr(float(v))
+
+
+def environment_range_problems(w):
+    """Every field of ScenarioWeather `w` outside its range (scensim issue 161), one line each,
+    naming the field, the value and the range with their unit; an angle also says what the
+    number would be as degrees (092 K9e sent 60, meant as degrees, as an elevation in radians).
+    The Rust shell's `environment_range_problems`, word for word."""
+    out = []
+
+    def angle(field, v, ok, text):
+        if not ok:
+            out.append(f"{field} {_num(v)} rad is outside {text} rad "
+                       f"({_num(v)} deg would be {math.radians(v):.4f} rad)")
+
+    if w.HasField("sun"):
+        a, e = w.sun.azimuth, w.sun.elevation
+        angle("sun_azimuth", a, 0.0 <= a < 2 * math.pi, "[0, 6.2832)")
+        angle("sun_elevation", e, -math.pi / 2 <= e <= math.pi / 2, "[-1.5708, 1.5708]")
+    if w.HasField("cloud_cover") and w.cloud_cover.oktas > 9:
+        out.append(f"cloud_cover {w.cloud_cover.oktas} oktas is outside 0 to 9 oktas "
+                   "(9: the sky cannot be seen)")
+    if w.HasField("fog") and not w.fog.visual_range > 0.0:
+        out.append(f"fog_visual_range {_num(w.fog.visual_range)} m is outside its range, "
+                   "above 0 m")
+    if w.HasField("precipitation") and not w.precipitation.intensity >= 0.0:
+        out.append(f"precipitation_intensity {_num(w.precipitation.intensity)} mm/h is outside "
+                   "its range, 0 or more mm/h")
+    return out
 
 
 def serve(socket, server, should_stop=lambda: False, poll_ms=100):

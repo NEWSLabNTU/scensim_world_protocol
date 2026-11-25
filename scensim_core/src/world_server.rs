@@ -182,6 +182,70 @@ pub struct Shell<W: World> {
     last_world_request: Instant,
     /// Test hook: whether a client is gone (default [`is_gone`]).
     gone: fn(&wire::ClientId) -> bool,
+    /// `READBACK_AFTER_STEP` (scensim issue 161): a `SetEnvironment` since the last step, whose
+    /// read-back the next step's reply carries.
+    environment_sent: bool,
+    /// The same for a `SetRoadCondition`: the condition sent last.
+    road_condition_sent: Option<wire::RoadCondition>,
+}
+
+/// Every field of `w` outside its range (scensim issue 161), one line each, naming the field,
+/// the value and the range with their unit; an angle also says what the number would be as
+/// degrees (092 K9e sent 60, meant as degrees, as an elevation in radians). Empty: in range.
+pub fn environment_range_problems(w: &wire::ScenarioWeather) -> Vec<String> {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let mut out = Vec::new();
+    let angle = |field: &str, v: f64, ok: bool, range: &str, out: &mut Vec<String>| {
+        if !ok {
+            out.push(format!(
+                "{field} {v} rad is outside {range} rad ({v} deg would be {:.4} rad)",
+                v.to_radians()
+            ));
+        }
+    };
+    if let Some(sun) = &w.sun {
+        let a = sun.azimuth;
+        angle(
+            "sun_azimuth",
+            a,
+            (0.0..2.0 * PI).contains(&a),
+            "[0, 6.2832)",
+            &mut out,
+        );
+        let e = sun.elevation;
+        angle(
+            "sun_elevation",
+            e,
+            (-FRAC_PI_2..=FRAC_PI_2).contains(&e),
+            "[-1.5708, 1.5708]",
+            &mut out,
+        );
+    }
+    if let Some(c) = &w.cloud_cover {
+        if c.oktas > 9 {
+            out.push(format!(
+                "cloud_cover {} oktas is outside 0 to 9 oktas (9: the sky cannot be seen)",
+                c.oktas
+            ));
+        }
+    }
+    if let Some(f) = &w.fog {
+        if f.visual_range.is_nan() || f.visual_range <= 0.0 {
+            out.push(format!(
+                "fog_visual_range {} m is outside its range, above 0 m",
+                f.visual_range
+            ));
+        }
+    }
+    if let Some(p) = &w.precipitation {
+        if p.intensity.is_nan() || p.intensity < 0.0 {
+            out.push(format!(
+                "precipitation_intensity {} mm/h is outside its range, 0 or more mm/h",
+                p.intensity
+            ));
+        }
+    }
+    out
 }
 
 fn same(a: &wire::ClientId, b: &wire::ClientId) -> bool {
@@ -230,6 +294,8 @@ impl<W: World> Shell<W> {
             fatal: None,
             last_world_request: Instant::now(),
             gone: is_gone,
+            environment_sent: false,
+            road_condition_sent: None,
         }
     }
 
@@ -241,6 +307,36 @@ impl<W: World> Shell<W> {
 
     pub fn offers(&self, c: wire::Capability) -> bool {
         self.capabilities.contains(&(c as i32))
+    }
+
+    /// `READBACK_AFTER_STEP` (scensim issue 161): into a step's reply, after the simulator's
+    /// tick, the read-back of a `SetEnvironment` or `SetRoadCondition` sent since the last step.
+    fn read_back_after_step(&mut self, reply: &mut wire::StepReply) -> WorldResult<()> {
+        if let Some(rc) = self.road_condition_sent.take() {
+            if self.offers(wire::Capability::RoadConditionApplied) {
+                let applied = self
+                    .world
+                    .applied_road_condition(&rc)
+                    .map_err(|r| Refusal {
+                        message: format!(
+                            "the road condition's read-back after the step: {}",
+                            r.message
+                        ),
+                        fatal: r.fatal,
+                    })?;
+                reply.road_condition_applied = Some(applied);
+            }
+        }
+        if std::mem::take(&mut self.environment_sent)
+            && self.offers(wire::Capability::EnvironmentApplied)
+        {
+            let applied = self.world.applied_environment().map_err(|r| Refusal {
+                message: format!("the environment's read-back after the step: {}", r.message),
+                fatal: r.fatal,
+            })?;
+            reply.environment_applied = Some(applied);
+        }
+        Ok(())
     }
 
     pub fn owner(&self) -> Option<&wire::ClientId> {
@@ -490,7 +586,9 @@ impl<W: World> Shell<W> {
                         "Step carries no poses since protocol 4: send them by Apply",
                     ));
                 }
-                ok(Some(R::Step(self.world.step(&req)?)))
+                let mut reply = self.world.step(&req)?;
+                self.read_back_after_step(&mut reply)?;
+                ok(Some(R::Step(reply)))
             }
             Q::SetStepTime(req) => {
                 self.world.set_step_time(req.step_time)?;
@@ -534,6 +632,9 @@ impl<W: World> Shell<W> {
                     )));
                 }
                 self.world.set_road_condition(&rc)?;
+                if self.offers(wire::Capability::ReadbackAfterStep) {
+                    self.road_condition_sent = Some(rc.clone());
+                }
                 if self.offers(wire::Capability::RoadConditionApplied) {
                     let applied = self.world.applied_road_condition(&rc)?;
                     ok(Some(R::RoadCondition(applied)))
@@ -546,7 +647,21 @@ impl<W: World> Shell<W> {
                     wire::Capability::Environment,
                     "the weather and time of day are",
                 )?;
+                let problems = req
+                    .weather
+                    .as_ref()
+                    .map(environment_range_problems)
+                    .unwrap_or_default();
+                if !problems.is_empty() {
+                    return Err(Refusal::new(format!(
+                        "SetEnvironment refused, nothing changed:\n{}",
+                        problems.join("\n")
+                    )));
+                }
                 self.world.set_environment(&req)?;
+                if self.offers(wire::Capability::ReadbackAfterStep) {
+                    self.environment_sent = true;
+                }
                 if self.offers(wire::Capability::EnvironmentApplied) {
                     let applied = self.world.applied_environment()?;
                     ok(Some(R::Environment(wire::EnvironmentReply {

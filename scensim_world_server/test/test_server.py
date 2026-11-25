@@ -2,6 +2,7 @@
 
     python3 -m unittest discover -s src/scensim_world_server/test     # protobuf only
 """
+import math
 import os
 import shutil
 import signal
@@ -398,6 +399,114 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(a.zones["ford"].HasField("water_depth"))
         self.assertAlmostEqual(a.zones["ford"].water_depth, 0.2)
         self.assertFalse(a.zones["patch"].HasField("water_depth"))
+
+    def test_issue_161_out_of_range_values_are_refused_by_name_with_the_unit(self):
+        """Issue 161: a value outside its field's range refuses the whole request, by field,
+        value and range with their unit, word for word as the Rust shell; nothing is applied."""
+        calls = []
+        self.world.set_environment = lambda w, t, now: calls.append(w)
+        self.world.capabilities = ("ENVIRONMENT",)
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+
+        def weather(**parts):
+            w = pb.ScenarioWeather()
+            w.fog.visual_range = 500.0
+            for k, v in parts.items():
+                if k == "sun":
+                    w.sun.azimuth, w.sun.elevation = v
+                elif k == "fog":
+                    w.fog.visual_range = v
+                elif k == "oktas":
+                    w.cloud_cover.oktas = v
+                elif k == "rain":
+                    w.precipitation.type = pb.PRECIPITATION["RAIN"]
+                    w.precipitation.intensity = v
+            return w
+
+        for w, says in [
+            (weather(sun=(0.0, 1.6)), "sun_elevation 1.6 rad is outside [-1.5708, 1.5708] rad"),
+            (weather(sun=(-0.1, 0.0)), "sun_azimuth -0.1 rad is outside [0, 6.2832) rad"),
+            (weather(sun=(float("nan"), 0.0)), "sun_azimuth NaN rad"),
+            (weather(fog=0.0), "fog_visual_range 0 m is outside its range, above 0 m"),
+            (weather(oktas=10), "cloud_cover 10 oktas is outside 0 to 9 oktas"),
+            (weather(rain=-1.0),
+             "precipitation_intensity -1 mm/h is outside its range, 0 or more mm/h"),
+        ]:
+            r = call(server, set_environment=pb.SetEnvironment(weather=w))
+            self.assertFalse(r.ok)
+            self.assertIn(says, r.error)
+            self.assertIn("nothing changed", r.error)
+        self.assertEqual(calls, [])
+        for w in [weather(sun=(0.0, math.pi / 2)), weather(sun=(0.0, -math.pi / 2)),
+                  weather(fog=0.1), weather(oktas=9), weather(rain=0.0)]:
+            r = call(server, set_environment=pb.SetEnvironment(weather=w))
+            self.assertTrue(r.ok, r.error)
+
+    def test_issue_161_k9e_60_sent_as_radians_is_refused_saying_the_units(self):
+        """Issue 161, the K9e case (133): 60 meant as degrees, sent as an elevation in radians,
+        is refused, saying rad and what 60 deg would have been; 60 deg in radians is taken."""
+        self.world.set_environment = lambda w, t, now: None
+        self.world.capabilities = ("ENVIRONMENT",)
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+        w = pb.ScenarioWeather()
+        w.sun.elevation = 60.0
+        r = call(server, set_environment=pb.SetEnvironment(weather=w))
+        self.assertFalse(r.ok)
+        self.assertIn("sun_elevation 60 rad is outside [-1.5708, 1.5708] rad "
+                      "(60 deg would be 1.0472 rad)", r.error)
+        w.sun.elevation = math.radians(60.0)
+        self.assertTrue(call(server, set_environment=pb.SetEnvironment(weather=w)).ok)
+
+    def test_issue_161_the_step_after_a_send_carries_the_read_back_after_its_step(self):
+        """Issue 161: with READBACK_AFTER_STEP the first step after a SetEnvironment or a
+        SetRoadCondition carries the read-back taken after the world's step; the next does not;
+        without the bit none does."""
+        shown, at_step = {}, {}
+        self.world.set_environment = lambda w, t, now: at_step.update(w or {})
+        self.world.applied_environment = lambda: dict(shown)
+        road = {"friction_scale_factor": 1.0, "wetness": "dry", "zones": {}}
+        self.world.set_road_condition = lambda f, wet, props: at_step.update(road=(f, wet))
+        self.world.applied_road_condition = lambda zone_ids: dict(road)
+        step_of = self.world.step
+
+        def lagging_step(*a):
+            # this world shows what it was sent only after its step (CARLA 0.9.16's weather)
+            out = step_of(*a)
+            r = at_step.pop("road", None)
+            if r:
+                road.update(friction_scale_factor=r[0], wetness=r[1])
+            shown.update(at_step)
+            at_step.clear()
+            return out
+        self.world.step = lagging_step
+        self.world.capabilities = ("ENVIRONMENT", "ENVIRONMENT_APPLIED", "ROAD_CONDITION",
+                                   "ROAD_CONDITION_APPLIED", "READBACK_AFTER_STEP")
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+        call(server, load_world=pb.LoadWorld(world="/maps/x.usd"))
+        w = pb.ScenarioWeather()
+        w.fog.visual_range = 120.0
+        r = call(server, set_environment=pb.SetEnvironment(weather=w))
+        self.assertFalse(r.environment.applied.HasField("fog"))   # before the step
+        rc = pb.RoadCondition(friction_scale_factor=0.8, wetness="moist")
+        r = call(server, set_road_condition=pb.SetRoadCondition(road_condition=rc))
+        self.assertAlmostEqual(r.road_condition.friction_scale_factor, 1.0)
+        r = step(server)
+        self.assertTrue(r.ok, r.error)
+        self.assertEqual(r.step.environment_applied.fog.visual_range, 120.0)
+        self.assertAlmostEqual(r.step.road_condition_applied.friction_scale_factor, 0.8)
+        self.assertEqual(r.step.road_condition_applied.wetness, "moist")
+        r = step(server)
+        self.assertFalse(r.step.HasField("environment_applied"))
+        self.assertFalse(r.step.HasField("road_condition_applied"))
+        self.world.capabilities = ("ENVIRONMENT", "ENVIRONMENT_APPLIED")
+        server = WorldServer(self.world, clock=self.clock)
+        hello(server)
+        call(server, load_world=pb.LoadWorld(world="/maps/x.usd"))
+        self.assertTrue(call(server, set_environment=pb.SetEnvironment(weather=w)).ok)
+        self.assertFalse(step(server).step.HasField("environment_applied"))
 
     def test_signals_come_with_the_world_and_take_colours(self):
         hello(self.server)

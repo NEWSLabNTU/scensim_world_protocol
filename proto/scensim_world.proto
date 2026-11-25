@@ -49,7 +49,9 @@
 // server declaring `COMMANDS`, and `ReadBack.cmd_frame` is a field an older peer ignores. Nor do
 // 092 K9f-a's and 086 C7's `RoadConditionReply` and zones: only a server declaring
 // `ROAD_CONDITION_APPLIED` sends the reply, and the bridge reads it only from one; only one
-// declaring `ROAD_ZONES` fills its zones.)
+// declaring `ROAD_ZONES` fills its zones. Nor do scensim issue 161's `StepReply` read-backs: only
+// a server declaring `READBACK_AFTER_STEP` fills them. Nor does 161's range check: a value
+// outside `ScenarioWeather`'s ranges was never one the protocol defined.)
 
 syntax = "proto3";
 
@@ -128,6 +130,13 @@ enum Capability {
   // applies after it, read back from the simulator, for the world-wide part (and, with
   // `ROAD_ZONES`, the zones). Needs `ROAD_CONDITION`.
   CAPABILITY_ROAD_CONDITION_APPLIED = 14;
+  // `StepReply.environment_applied` and `StepReply.road_condition_applied` (scensim issue 161):
+  // on the first step after a `SetEnvironment` (with `ENVIRONMENT_APPLIED`) or a
+  // `SetRoadCondition` (with `ROAD_CONDITION_APPLIED`), the read-back taken after the
+  // simulator's tick returned, which a read right after the send may not be (CARLA 0.9.16).
+  // Needs `ENVIRONMENT_APPLIED` or `ROAD_CONDITION_APPLIED`. A server declaring it fills the field
+  // on that step without fail; an empty one is a protocol error.
+  CAPABILITY_READBACK_AFTER_STEP = 15;
 }
 
 // Who sends a request: what the owner lease is checked against.
@@ -546,6 +555,12 @@ message StepReply {
   // 0 from a server that does not say (Isaac). Additive.
   int64 tick_start_mono_ns = 9;
   int64 tick_return_mono_ns = 10;
+  // `READBACK_AFTER_STEP` (scensim issue 161): on the first step after a `SetEnvironment`, the
+  // weather the world shows after this step's tick (`EnvironmentReply.applied`'s form); on the
+  // first step after a `SetRoadCondition`, the road state it applies after it
+  // (`RoadConditionReply`'s form). Unset on every other step. Additive.
+  ScenarioWeather environment_applied = 11;
+  RoadConditionReply road_condition_applied = 12;
 }
 
 // What a `COMMANDS` server could not apply, since its world's last load.
@@ -647,7 +662,10 @@ message RoadConditionReply {
 // SSv2's `UpdateEnvironment` weather and time of day (OpenSCENARIO `Weather`, `TimeOfDay`;
 // roadmap 047). Every part is optional: one not set leaves that part as it was. `LoadWorld` and
 // `Release` go back to the world's own sky and weather. A server refuses, with every problem
-// listed, a part it cannot show, and then changes nothing.
+// listed, a part it cannot show, and then changes nothing. The shell refuses a value outside its
+// field's range the same way (scensim issue 161), naming the field, the value and the range with
+// their unit: the sun's azimuth [0, 2 pi) rad and elevation [-pi/2, pi/2] rad, cloud cover 0 to
+// 9 oktas, a fog's visual range above 0 m, precipitation 0 or more mm/h.
 message ScenarioWeather {
   message CloudCover {
     // 0 (clear) to 8 (overcast); 9: the sky cannot be seen.

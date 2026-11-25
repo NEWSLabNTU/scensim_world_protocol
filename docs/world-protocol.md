@@ -104,6 +104,7 @@ shells do this for you).
 | `ENVIRONMENT_APPLIED` | reads the weather back after each `SetEnvironment` | `EnvironmentReply` |
 | `ROAD_ZONES` | applies `scensim.zone.<id>.<field>` to its map's surface record and lists every named zone in the reply; needs `ROAD_CONDITION_APPLIED` | `RoadConditionReply.zones` |
 | `ROAD_CONDITION_APPLIED` | reads the road state back after each `SetRoadCondition`; needs `ROAD_CONDITION` | `RoadConditionReply` |
+| `READBACK_AFTER_STEP` | reads the weather or road state back again after the first step that follows a send, the simulator's tick done (scensim issue 161); needs `ENVIRONMENT_APPLIED` or `ROAD_CONDITION_APPLIED` | `StepReply.environment_applied`, `StepReply.road_condition_applied` |
 | `COMMANDS` | moves `COMMANDED` bodies by a behaviour model's kinematic commands, which reach it with its tick gate's acknowledgements, and reads each back with the frame its command answered; needs `READS_BACK` | `Motion.COMMANDED`; `ReadBack.cmd_frame`, `EntityState.cmd_frame`, `StepReply.command_counts` |
 
 A `Spawn` with `motion: TRACKED` needs `TRACKED_MOTION` or `TRACKS_TARGETS`; `AUTOPILOT`
@@ -287,6 +288,13 @@ SSv2's `UpdateEnvironment` weather and time of day. Every part (`cloud_cover`, `
 server refuses, listing every problem, a part it cannot show, and then changes nothing.
 `LoadWorld` and `Release` go back to the world's own sky.
 
+Every server refuses a value outside its field's range the same way, by the shell before the
+world sees it (scensim issue 161): the sun's azimuth [0, 2 pi) rad and elevation [-pi/2, pi/2]
+rad, cloud cover 0 to 9 oktas, a fog's visual range above 0 m, precipitation 0 or more mm/h. The
+message names the field, the value and the range with their unit, and for an angle what the
+number would be as degrees: `sun_elevation 60 rad is outside [-1.5708, 1.5708] rad (60 deg would
+be 1.0472 rad)`.
+
 A server with `ENVIRONMENT_APPLIED` answers with `EnvironmentReply { applied }`: the weather it
 shows now, read back from its simulator in `ScenarioWeather`'s units, for every part the
 scenario has set (a part never given is unset). A knob profile's record reads it (scensim
@@ -294,6 +302,17 @@ roadmap 092 K9): the bridge sends a profile's value as `SetEnvironment` when it 
 writes the read-back beside it in the gap trace. CARLA reads back fog, cloud cover, rain and the
 sun (not wind: CARLA keeps no direction for it); Isaac reads back fog, rain and the sun from its
 renderer and the sun light (not clouds or wind, of which it keeps no state of its own).
+
+### The read-back after the step (`READBACK_AFTER_STEP`)
+
+A read-back taken right after the send may predate it: CARLA 0.9.16's client sends the weather
+without waiting, and a read sent next can be served first (scensim issue 161, 171). A server with
+`READBACK_AFTER_STEP` reads it back again after the first step that follows a `SetEnvironment`
+or a `SetRoadCondition`, once the simulator's tick has returned, and sends it in that step's
+reply: `StepReply.environment_applied` (`EnvironmentReply.applied`'s form) and
+`StepReply.road_condition_applied` (`RoadConditionReply`'s form). Every other step leaves them
+unset. A server declaring the capability fills the field on that step without fail; an owner
+treats an empty one as a protocol error. The shells do this for every server that declares it.
 
 ### Release, Shutdown
 

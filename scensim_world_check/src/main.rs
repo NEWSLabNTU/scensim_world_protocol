@@ -377,6 +377,24 @@ fn frame(
     Ok((a, s))
 }
 
+/// One step of 0.05 s, its reply (scensim issue 161's read-back after the step).
+fn one_step(c: &mut Client) -> Result<wire::StepReply, String> {
+    match call(
+        c,
+        Q::Step(wire::Step {
+            substeps: 1,
+            dt: 0.05,
+            ..Default::default()
+        }),
+        TIMEOUT * 30,
+    )?
+    .reply
+    {
+        Some(wire::reply::Reply::Step(s)) => Ok(s),
+        other => Err(format!("Step answered with {other:?}")),
+    }
+}
+
 fn state_x(s: &wire::StepReply, handle: u32) -> Option<f64> {
     s.states
         .iter()
@@ -1131,6 +1149,26 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
             "the default road condition is taken (ROAD_CONDITION)",
             call(&mut c, road(1.0, "dry", &[]), TIMEOUT * 5).map(|_| String::new()),
         );
+        if applied && has(wire::Capability::ReadbackAfterStep) {
+            // scensim issue 161: the step after the send carries its read-back, after the tick
+            r.check(
+                "the step after a road condition carries its read-back (READBACK_AFTER_STEP)",
+                match one_step(&mut c).map(|s| s.road_condition_applied) {
+                    Ok(Some(a))
+                        if (a.friction_scale_factor - 1.0).abs() < 1e-5 && a.wetness == "dry" =>
+                    {
+                        Ok(format!(
+                            "read back {} {}",
+                            a.friction_scale_factor, a.wetness
+                        ))
+                    }
+                    Ok(other) => Err(format!(
+                        "READBACK_AFTER_STEP, but the step's road_condition_applied is {other:?}"
+                    )),
+                    Err(e) => Err(e),
+                },
+            );
+        }
     } else {
         r.skip("road condition", "no ROAD_CONDITION");
     }
@@ -1146,6 +1184,16 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
                 Err("ROAD_ZONES without ROAD_CONDITION_APPLIED".into())
             }
             (false, true, _) => Err("ROAD_CONDITION_APPLIED without ROAD_CONDITION".into()),
+            // scensim issue 161
+            _ if has(wire::Capability::ReadbackAfterStep)
+                && !has(wire::Capability::EnvironmentApplied)
+                && !has(wire::Capability::RoadConditionApplied) =>
+            {
+                Err(
+                    "READBACK_AFTER_STEP without ENVIRONMENT_APPLIED or ROAD_CONDITION_APPLIED"
+                        .into(),
+                )
+            }
             _ => Ok(String::new()),
         },
     );
@@ -1173,8 +1221,55 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
         };
         r.check(
             "a clear noon is taken (ENVIRONMENT)",
-            call(&mut c, Q::SetEnvironment(clear), TIMEOUT * 5).map(|_| String::new()),
+            call(&mut c, Q::SetEnvironment(clear.clone()), TIMEOUT * 5).map(|_| String::new()),
         );
+        // scensim issue 161: a value out of range is refused by name and unit (092 K9e's 60,
+        // meant as degrees, sent as an elevation in radians)
+        let k9e = wire::SetEnvironment {
+            weather: Some(wire::ScenarioWeather {
+                sun: Some(sw::Sun {
+                    azimuth: 0.0,
+                    elevation: 60.0,
+                    illuminance: 0.0,
+                }),
+                ..Default::default()
+            }),
+            time_of_day: None,
+        };
+        r.check(
+            "an elevation of 60 rad is refused, saying rad (ENVIRONMENT)",
+            match call(&mut c, Q::SetEnvironment(k9e), TIMEOUT * 5) {
+                Err(e) if e.contains("sun_elevation 60 rad") => Ok(String::new()),
+                other => Err(format!("answered {other:?}")),
+            },
+        );
+        if has(wire::Capability::EnvironmentApplied) && has(wire::Capability::ReadbackAfterStep) {
+            let fog = wire::SetEnvironment {
+                weather: Some(wire::ScenarioWeather {
+                    fog: Some(sw::Fog {
+                        visual_range: 500.0,
+                    }),
+                    ..Default::default()
+                }),
+                time_of_day: None,
+            };
+            r.check(
+                "the step after a SetEnvironment carries its read-back (READBACK_AFTER_STEP)",
+                match call(&mut c, Q::SetEnvironment(fog), TIMEOUT * 5)
+                    .and_then(|_| one_step(&mut c))
+                    .map(|s| s.environment_applied.and_then(|w| w.fog))
+                {
+                    Ok(Some(f)) if (f.visual_range - 500.0).abs() < 1.0 => {
+                        Ok(format!("fog read back {} m", f.visual_range))
+                    }
+                    Ok(other) => Err(format!(
+                        "READBACK_AFTER_STEP, but the step's environment_applied fog is {other:?}"
+                    )),
+                    Err(e) => Err(e),
+                },
+            );
+            let _ = call(&mut c, Q::SetEnvironment(clear), TIMEOUT * 5);
+        }
     } else {
         r.skip("weather and time of day", "no ENVIRONMENT");
     }
