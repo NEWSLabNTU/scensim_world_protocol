@@ -132,6 +132,12 @@ class World:
         none) and every parameter, by this simulator's names."""
         raise NotImplementedError("this simulator has no weather service")
 
+    def initial_speed_taken(self, handle, speed):
+        """``INITIAL_SPEED``: the shell took a start speed for the entity, before its start
+        (scensim issue 204); `set_initial_speed` hands it over right before the start step. A
+        world may prepare now (CARLA releases a parked car's brakes, which take frames to let
+        go); raising refuses the request. Default: nothing to prepare."""
+
     def set_initial_speed(self, handle, speed):
         """``INITIAL_SPEED`` (scensim issue 204): start the entity at `speed` (m/s, along its
         spawn heading) from the step that follows. The shell calls it right before the entity's

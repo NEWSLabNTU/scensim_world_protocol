@@ -613,6 +613,10 @@ class SpeedWorld(FakeWorld):
     def __init__(self):
         super().__init__()
         self.initial_speeds = []
+        self.taken = []
+
+    def initial_speed_taken(self, handle, speed):
+        self.taken.append((handle, speed, len(self.steps)))
 
     def set_initial_speed(self, handle, speed):
         self.initial_speeds.append((handle, speed, len(self.steps)))
@@ -664,6 +668,18 @@ class InitialSpeedTest(unittest.TestCase):
         self.assertTrue(self.frame(True).ok)
         self.assertEqual(self.world.initial_speeds, [(late, 3.0, 1)])
         self.assertIn("after its start", initial_speed(self.server, late, 3.0).error)
+
+    def test_the_world_hears_of_a_start_speed_when_the_shell_takes_it(self):
+        spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")
+        self.assertTrue(self.frame(False).ok)
+        self.assertTrue(initial_speed(self.server, 1, 7.5).ok)
+        self.assertEqual(self.world.taken, [(1, 7.5, 1)])
+        self.assertEqual(self.world.initial_speeds, [])
+        self.assertTrue(self.frame(False).ok)
+        self.assertTrue(self.frame(True).ok)
+        self.assertEqual(self.world.initial_speeds, [(1, 7.5, 2)])
+        self.assertFalse(initial_speed(self.server, 1, 7.5).ok)
+        self.assertEqual(len(self.world.taken), 1)
 
     def test_a_despawned_entitys_initial_speed_never_reaches_the_world(self):
         spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")

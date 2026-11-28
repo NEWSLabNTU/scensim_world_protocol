@@ -68,6 +68,7 @@ is the error the bridge passes on to SSv2.
 | `spawn(handle, name, kind, subtype, center, dims, pose, model="", motion="KINEMATIC")` | yes | one body. `kind`: `"EGO"`, `"VEHICLE"`, `"PEDESTRIAN"`, `"MISC_OBJECT"`; `center` and `dims` the declared box; `motion`: `"KINEMATIC"`, `"TRACKED"`, `"EXTERNAL"`. Return None, or a dict for `SpawnReply.body` (below) |
 | `despawn(handle)` | yes | remove one body |
 | `step(drives, substeps, dt, render, sim_time)` | yes | apply `{handle: Drive}`, run `substeps` physics steps of `dt`, return `(states, contacts)` (below). `sim_time`: elapsed seconds at the step's start |
+| `initial_speed_taken(handle, speed)` | `INITIAL_SPEED` | the shell took a start speed, before the entity's start; prepare for it (CARLA releases a parked car's brakes, which take two frames to let go); raise `ValueError` to refuse it. Default: nothing |
 | `set_initial_speed(handle, speed)` | `INITIAL_SPEED` | start the body at `speed` m/s along its spawn heading from the `step` that follows (scensim issue 204); a vehicle's wheels spin to match. The shell calls it right before the entity's start step and has checked the rest |
 | `set_signals(colours)` | `SIGNALS` | `{opendrive_id: "OFF" / "RED" / "AMBER" / "GREEN"}`, from the next step on |
 | `set_road_condition(friction_scale, wetness, properties)` | `ROAD_CONDITION` | raise `ValueError` listing every problem, and change nothing, for what cannot be applied |
@@ -253,7 +254,7 @@ through `WorldServer.handle(bytes) -> bytes`, with no socket: the way to unit-te
   `load_world(&LoadWorld) -> LoadWorldReply`, `spawn(handle, &Spawn) -> Body`,
   `despawn`, `apply(&Apply) -> ApplyReply`, `step(&Step) -> StepReply`; and, with their
   capabilities, `set_signals`, `set_goal`, `set_weather`, `get_weather`,
-  `set_road_condition`, `set_environment`, `set_initial_speed`. Optional: `max_physics_dt`, `ready`,
+  `set_road_condition`, `set_environment`, `initial_speed_taken`, `set_initial_speed`. Optional: `max_physics_dt`, `ready`,
   `set_step_time`, `reset`, `release` (default: as `reset`), `idle` (called after a while
   without a world request; `Some(reason)` ends the server as `End::Lost`), `shutdown`.
   Every method returns `WorldResult<T>`; `Refusal::new(text)` refuses, `Refusal::fatal(text)`
@@ -311,6 +312,9 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 | a kinematic body goes where it is posed | the NPC's `x` in the step replies' `states` moved 4 m (within 0.5) from the first frame to the fifth |
 | a pose's orientation reads back as posed | the NPC posed at (30, 0, 1.5) with roll +5, pitch -10 (nose up), yaw 30 deg (ROS REP-103) reads back within 1 deg in the next step's `states`. It catches a server whose two directions disagree; one that mirrors both alike passes it |
 | the ego settles with the road's pitch sign | with `--slope X,Y,Z,YAW,PITCH`: the ego was spawned level at (X, Y, Z) with heading YAW (world frame, m, deg) on a known slope of the `--map`, whose pitch along that heading is PITCH (deg, ROS's sense: facing uphill is negative). After 60 steps (3 s) of the simulator's own gravity, its read-back pitch has PITCH's sign and is within 3 deg of it. This is the absolute check: only the world's geometry decides it. Skipped without `--slope`. CARLA, NTU ramp (072 leg 40): `--map <NTU> --slope 52969.53,67864.92,9.6,-91.1,-10.5` (map coordinates: the check's map origin is 0) |
+| an initial speed is refused without INITIAL_SPEED | without `INITIAL_SPEED`: `SetInitialSpeed` for the ego is refused, naming the capability |
+| an ego given a start speed (four checks per speed) | with `INITIAL_SPEED`, for 5 and 10 m/s, on a fresh ego where the check's ego was (on `--slope`'s slope when given): one frame after the spawn, then `SetInitialSpeed`, then 5 frames before SSv2's NPC logic starts, on which it is at rest (0.05 m/s at most) and its pose holds within 1 cm; on the start frame it is at the speed within 0.05 m/s and 2 deg of its heading; a second `SetInitialSpeed` is refused after the start; after 1 s with no command it is between v - g sin(grade) - 0.1 and v - g sin(grade) + 0.05 m/s (below) |
+| a kinematic body takes no initial speed | with `INITIAL_SPEED`: `SetInitialSpeed` for a `KINEMATIC` vehicle is refused, naming its motion |
 | despawning an unknown handle is refused | `Despawn` of handle 999999 is refused |
 | a tracked body follows at 5 m/s | with `TRACKS_TARGETS` or `TRACKED_MOTION`: a `TRACKED` vehicle at (60, 0, 0.5) is driven for 20 frames at 5 m/s (by pose and `ssv2_twist`, or by `twist`) and moves more than 2.5 m; under `TRACKS_TARGETS` the 20th `ApplyReply` has a `TrackingSample` for it. Skipped otherwise |
 | signal colours are taken / signals are refused without SIGNALS | with `SIGNALS`, an empty `SetSignals` succeeds; without, it is refused |
@@ -325,6 +329,12 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 A core-only server runs 20 checks (21 with `--slope`). Not checked here: `AGENT_VEHICLES`, `READS_BACK`,
 `CONTACTS`, `AUTOPILOT`, and `Body.wheels` and `spec_hash` (the bridge checks those against
 the catalog at a real ego's spawn).
+
+The coast after a start speed: a car with no command loses speed to rolling resistance and
+drag, and to the grade (g sin of the road's pitch, from `--slope`). The 0.1 m/s allowed in 1 s
+beyond the grade is twice what CARLA 0.9.16 measured: 0.05 m/s at 10 m/s on the flat (Tesla
+Model 3, 0.003125 s physics substeps), after the start frame. An Isaac measurement goes here
+with its server's support (scensim issue 204).
 
 Request timeouts: `Hello` 2 s, `Spawn` 120 s (the bridge's `load_timeout_seconds` default), `Apply` 10 s, `Step` 60 s, `LoadWorld` and
 `SetWeather` 300 s. A server that does not answer in time fails that check.

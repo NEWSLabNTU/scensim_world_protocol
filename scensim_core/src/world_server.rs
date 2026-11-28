@@ -78,6 +78,13 @@ pub trait World {
     /// step, the first once SSv2's NPC logic has started, having checked the handle, that the
     /// simulator moves it, and that the speed is finite and >= 0; through the steps before, the
     /// body is at rest.
+    /// `INITIAL_SPEED`: the shell took a start speed for the entity, before its start (scensim
+    /// issue 204); `set_initial_speed` hands it over right before the start step. A world may
+    /// prepare now: CARLA releases a parked car's brakes, which take frames to let go. A refusal
+    /// refuses the request. Default: nothing to prepare.
+    fn initial_speed_taken(&mut self, _handle: u32, _speed: f64) -> WorldResult<()> {
+        Ok(())
+    }
     fn set_initial_speed(&mut self, _handle: u32, _speed: f64) -> WorldResult<()> {
         Err(Refusal::new(
             "initial speeds are not offered by this server",
@@ -656,6 +663,7 @@ impl<W: World> Shell<W> {
                         req.speed
                     )));
                 }
+                self.world.initial_speed_taken(req.handle, req.speed)?;
                 self.initial_speeds.insert(req.handle, req.speed);
                 ok(None)
             }

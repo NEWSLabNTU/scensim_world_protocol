@@ -430,6 +430,7 @@ class WorldServer:
         if not (math.isfinite(req.speed) and req.speed >= 0.0):
             raise RequestError(f"{name!r}: initial speed {req.speed} m/s; it must be finite "
                                "and >= 0")
+        self.world.initial_speed_taken(req.handle, req.speed)
         self.initial_speeds[req.handle] = req.speed
         return pb.Reply(ok=True)
 

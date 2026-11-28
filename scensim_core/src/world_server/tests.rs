@@ -18,6 +18,8 @@ struct Fake {
     steps: u32,
     /// (handle, speed, the steps run before it reached the world)
     initial_speeds: Vec<(u32, f64, u32)>,
+    /// (handle, speed, the steps run when the shell took it)
+    taken: Vec<(u32, f64, u32)>,
 }
 
 impl World for Fake {
@@ -100,6 +102,10 @@ impl World for Fake {
             wetness: w,
             zones: Default::default(),
         })
+    }
+    fn initial_speed_taken(&mut self, handle: u32, speed: f64) -> WorldResult<()> {
+        self.taken.push((handle, speed, self.steps));
+        Ok(())
     }
     fn set_initial_speed(&mut self, handle: u32, speed: f64) -> WorldResult<()> {
         self.initial_speeds.push((handle, speed, self.steps));
@@ -785,4 +791,22 @@ fn a_load_world_forgets_which_entities_have_started() {
     spawn(&mut s, 1, "ego", wire::Motion::External);
     let r = initial_speed(&mut s, 2, 4.0);
     assert!(r.ok, "{}", r.error);
+}
+
+/// The world hears of a start speed when the shell takes it, before the start, so it can
+/// prepare (CARLA releases a parked car's brakes, which take frames to let go).
+#[test]
+fn the_world_hears_of_a_start_speed_when_the_shell_takes_it() {
+    let mut s = initial_speed_shell();
+    spawn(&mut s, 1, "ego", wire::Motion::External);
+    assert!(ssv2_frame(&mut s, false).ok);
+    assert!(initial_speed(&mut s, 1, 7.5).ok);
+    assert_eq!(s.world.taken, vec![(1, 7.5, 1)]);
+    assert!(s.world.initial_speeds.is_empty());
+    assert!(ssv2_frame(&mut s, false).ok);
+    assert!(ssv2_frame(&mut s, true).ok);
+    assert_eq!(s.world.initial_speeds, vec![(1, 7.5, 2)]);
+    // refused requests never reach it
+    assert!(!initial_speed(&mut s, 1, 7.5).ok);
+    assert_eq!(s.world.taken.len(), 1);
 }

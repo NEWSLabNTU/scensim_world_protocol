@@ -258,6 +258,11 @@ for an engagement. Through those steps the body stays at rest at its spawn pose.
 step's reply it is at the speed; with no command it coasts on from there. For an entity
 spawned after the start, the start is its first `Step`.
 
+**The world's part.** The shell hands the world the speed twice: when it takes the request
+(`initial_speed_taken`: a world may prepare, as CARLA releases a parked car's brakes, which
+take two frames to let go) and right before the start step (`set_initial_speed`: the body is
+at the speed from that step).
+
 **What is refused.** One sent after the entity's start, and one for a body the bridge poses
 (`KINEMATIC`, `TRACKED`: their speed comes from their poses). Sent again before the start, the
 last one holds.

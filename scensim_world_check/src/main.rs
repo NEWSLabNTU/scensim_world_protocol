@@ -1292,6 +1292,7 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
         has(wire::Capability::InitialSpeed),
         ego,
         ego_at,
+        slope.map(|s| s[4]),
         steps,
     );
 
@@ -1318,28 +1319,39 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
     finish(c, r)
 }
 
-/// The body's speed in a step reply, and its heading off +x, deg.
-fn state_speed(s: &wire::StepReply, handle: u32) -> Option<(f64, f64)> {
-    let v = s
-        .states
-        .iter()
-        .find(|e| e.handle == handle)
-        .and_then(|e| e.twist.as_ref())
-        .and_then(|t| t.linear)?;
-    let speed = (v.x * v.x + v.y * v.y).sqrt();
-    Some((speed, v.y.atan2(v.x).to_degrees()))
+/// The body's speed in a step reply (3D, m/s), its heading in the plane (deg, world frame), and
+/// its position.
+fn state_motion(s: &wire::StepReply, handle: u32) -> Option<(f64, f64, [f64; 3])> {
+    let e = s.states.iter().find(|e| e.handle == handle)?;
+    let v = e.twist.as_ref().and_then(|t| t.linear)?;
+    let p = e.pose.as_ref().and_then(|p| p.position)?;
+    let speed = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+    Some((speed, v.y.atan2(v.x).to_degrees(), [p.x, p.y, p.z]))
 }
 
-/// `INITIAL_SPEED` (scensim issue 204): an ego given v stays at rest on a frame before SSv2's
-/// NPC logic starts, is at v along its heading on the start frame, and coasts on from there; a
-/// late or posed initial speed is refused. Without the
-/// capability, the request is refused by name. The check's ego is replaced for it.
+/// Frames between a SetInitialSpeed and the start, as SSv2 gives an ego that waits for its
+/// engagement (seconds of them; five here). A world may need them: CARLA's brakes take two to
+/// let a parked car go.
+const PRE_START_FRAMES: usize = 5;
+
+/// What a car coasting with no command loses in 1 s on the flat, beyond the grade's share, at
+/// most: CARLA 0.9.16 measured 0.05 m/s at 10 m/s (rolling and drag), with a margin of 2.
+const COAST_LOSS_1S: f64 = 0.1;
+
+/// `INITIAL_SPEED` (scensim issue 204), on a fresh ego for each of 5 and 10 m/s, spawned where
+/// the check's ego was (on `--slope`'s slope when given): one frame after the spawn (SSv2's
+/// first update), then SetInitialSpeed, then `PRE_START_FRAMES` frames before SSv2's NPC logic
+/// starts, on which it is at rest and its pose holds within 1 cm; on the start frame it is at v
+/// within 0.05 m/s along its heading (2 deg); after 1 s with no command it is at v less the
+/// grade's g sin(pitch) and at most `COAST_LOSS_1S`. A late or posed initial speed is refused.
+/// Without the capability, the request is refused by name. The check's ego is replaced for it.
 fn initial_speed_cases(
     c: &mut Client,
     r: &mut Report,
     offered: bool,
     ego: Option<u32>,
     at: wire::Pose,
+    road_pitch_deg: Option<f64>,
     steps: (u32, f64),
 ) {
     let set = |c: &mut Client, handle: u32, speed: f64| {
@@ -1358,14 +1370,27 @@ fn initial_speed_cases(
                 other => Err(format!("answered {other:?}")),
             },
         );
-        r.skip("an ego spawned at speed", "no INITIAL_SPEED");
+        r.skip("an ego given a start speed", "no INITIAL_SPEED");
         return;
     }
     if let Some(e) = ego {
         let _ = call(c, Q::Despawn(wire::Despawn { handle: e }), TIMEOUT);
     }
+    let heading = at.orientation.as_ref().map_or(0.0, |q| {
+        coordinate_conversion::quaternion_to_euler(q.x, q.y, q.z, q.w)
+            .2
+            .to_degrees()
+    });
+    // ROS's pitch: facing uphill is negative, so an uphill start loses g sin(-pitch) per s
+    let grade_loss = road_pitch_deg.map_or(0.0, |p| 9.81 * (-p).to_radians().sin());
     let frame_s = f64::from(steps.0) * steps.1;
     let second = (1.0 / frame_s).round().max(1.0) as usize;
+    let only = |h| {
+        vec![wire::EntityPose {
+            handle: h,
+            ..Default::default()
+        }]
+    };
     for v in [5.0, 10.0] {
         let what = format!("an ego given {v} m/s is at it on the start frame (INITIAL_SPEED)");
         let name = format!("conformance_ego_v{v}");
@@ -1376,41 +1401,69 @@ fn initial_speed_cases(
                 continue;
             }
         };
+        let _ = frame_started(c, only(e), steps, false);
         if let Err(err) = set(c, e, v) {
             r.check(&what, Err(err));
             let _ = call(c, Q::Despawn(wire::Despawn { handle: e }), TIMEOUT);
             continue;
         }
-        let only = |h| {
-            vec![wire::EntityPose {
-                handle: h,
-                ..Default::default()
-            }]
-        };
-        let before = frame_started(c, only(e), steps, false).map(|(_, s)| state_speed(&s, e));
+        let mut before = Vec::new();
+        let mut failure = None;
+        for _ in 0..PRE_START_FRAMES {
+            match frame_started(c, only(e), steps, false) {
+                Ok((_, s)) => before.push(state_motion(&s, e)),
+                Err(err) => {
+                    failure = Some(err);
+                    break;
+                }
+            }
+        }
         r.check(
-            &format!("an ego given {v} m/s stays at rest before SSv2's NPC logic starts"),
-            match before {
-                Err(err) => Err(err),
-                Ok(Some((got, _))) if got > 0.05 => Err(format!(
-                    "{got:.3} m/s on a frame before the start: the speed is for the start"
-                )),
-                Ok(_) => Ok(String::new()),
+            &format!(
+                "an ego given {v} m/s stays at rest, its pose within 1 cm, before SSv2's NPC \
+                 logic starts"
+            ),
+            match (failure, before.first(), before.last()) {
+                (Some(err), ..) => Err(err),
+                (None, Some(Some((_, _, p0))), Some(Some((vl, _, p1)))) => {
+                    let drift = ((p1[0] - p0[0]).powi(2)
+                        + (p1[1] - p0[1]).powi(2)
+                        + (p1[2] - p0[2]).powi(2))
+                    .sqrt();
+                    let fastest = before
+                        .iter()
+                        .flatten()
+                        .map(|(x, ..)| *x)
+                        .fold(*vl, f64::max);
+                    if fastest > 0.05 || drift > 0.01 {
+                        Err(format!(
+                            "{fastest:.3} m/s at most, the pose moved {drift:.4} m over \
+                             {PRE_START_FRAMES} frames before the start"
+                        ))
+                    } else {
+                        Ok(format!("{drift:.4} m over {PRE_START_FRAMES} frames"))
+                    }
+                }
+                _ => Err("no velocity or pose for it in the step replies".into()),
             },
         );
-        let first = frame(c, only(e), steps).map(|(_, s)| state_speed(&s, e));
+        let first = frame(c, only(e), steps).map(|(_, s)| state_motion(&s, e));
         r.check(
             &what,
             match first {
                 Err(err) => Err(err),
                 Ok(None) => Err("no velocity for it in the step reply".into()),
-                Ok(Some((got, yaw))) if (got - v).abs() <= 0.05 && yaw.abs() <= 2.0 => {
-                    Ok(format!("{got:.3} m/s, {yaw:.2} deg off its heading"))
+                Ok(Some((got, yaw, _))) => {
+                    let off = ((yaw - heading + 540.0) % 360.0) - 180.0;
+                    if (got - v).abs() <= 0.05 && off.abs() <= 2.0 {
+                        Ok(format!("{got:.3} m/s, {off:.2} deg off its heading"))
+                    } else {
+                        Err(format!(
+                            "{got:.3} m/s, {off:.2} deg off its heading: want {v} within 0.05 \
+                             m/s and 2 deg"
+                        ))
+                    }
                 }
-                Ok(Some((got, yaw))) => Err(format!(
-                    "{got:.3} m/s, {yaw:.2} deg off its heading: want {v} within 0.05 m/s \
-                     and 2 deg"
-                )),
             },
         );
         r.check(
@@ -1422,27 +1475,36 @@ fn initial_speed_cases(
         );
         let mut last = None;
         let mut failure = None;
+        let mut trail = Vec::new();
         for _ in 1..second {
             match frame(c, only(e), steps) {
-                Ok((_, s)) => last = state_speed(&s, e),
+                Ok((_, s)) => {
+                    last = state_motion(&s, e);
+                    trail.push(last.map_or(f64::NAN, |(x, ..)| x));
+                }
                 Err(err) => {
                     failure = Some(err);
                     break;
                 }
             }
         }
+        let (lo, hi) = (v - grade_loss - COAST_LOSS_1S, v - grade_loss + 0.05);
         r.check(
             &format!("an ego given {v} m/s coasts on from it, not from rest, for 1 s"),
             match (failure, last) {
                 (Some(err), _) => Err(err),
                 (None, None) => Err("no velocity for it in the step replies".into()),
-                (None, Some((got, _))) if got >= v - 0.5 && got <= v + 0.05 => {
-                    Ok(format!("{got:.3} m/s after 1 s"))
-                }
-                (None, Some((got, _))) => Err(format!(
-                    "{got:.3} m/s after 1 s with no command: want {} to {} m/s",
-                    v - 0.5,
-                    v + 0.05
+                (None, Some((got, ..))) if (lo..=hi).contains(&got) => Ok(format!(
+                    "{got:.3} m/s after 1 s (the grade's share {grade_loss:.3})"
+                )),
+                (None, Some((got, ..))) => Err(format!(
+                    "{got:.3} m/s after 1 s with no command: want {lo:.3} to {hi:.3} m/s \
+                     (frame by frame: {})",
+                    trail
+                        .iter()
+                        .map(|x| format!("{x:.2}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 )),
             },
         );
