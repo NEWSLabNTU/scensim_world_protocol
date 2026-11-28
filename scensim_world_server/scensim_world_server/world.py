@@ -132,6 +132,13 @@ class World:
         none) and every parameter, by this simulator's names."""
         raise NotImplementedError("this simulator has no weather service")
 
+    def set_initial_speed(self, handle, speed):
+        """``INITIAL_SPEED`` (scensim issue 204): start the entity at `speed` (m/s, along its
+        spawn heading) from the next step. The shell has checked the handle, that no step has
+        run since its spawn, that the simulator moves it, and that the speed is finite and
+        >= 0."""
+        raise NotImplementedError("this simulator does not start entities at speed")
+
     def reset(self, handles):
         """A new owner, or the old one released the world: every entity goes. The world
         stays loaded."""

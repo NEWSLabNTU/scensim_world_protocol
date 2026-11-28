@@ -16,6 +16,7 @@ struct Fake {
     lag: bool,
     fog_at_tick: Option<f64>,
     steps: u32,
+    initial_speeds: Vec<(u32, f64)>,
 }
 
 impl World for Fake {
@@ -98,6 +99,10 @@ impl World for Fake {
             wetness: w,
             zones: Default::default(),
         })
+    }
+    fn set_initial_speed(&mut self, handle: u32, speed: f64) -> WorldResult<()> {
+        self.initial_speeds.push((handle, speed));
+        Ok(())
     }
     fn applied_environment(&mut self) -> WorldResult<wire::ScenarioWeather> {
         Ok(wire::ScenarioWeather {
@@ -253,6 +258,7 @@ fn what_is_not_offered_is_refused() {
         wire::request::Request::GetWeather(Default::default()),
         wire::request::Request::SetRoadCondition(Default::default()),
         wire::request::Request::SetEnvironment(Default::default()),
+        wire::request::Request::SetInitialSpeed(Default::default()),
     ] {
         let r = call(&mut s, 1, q);
         assert!(!r.ok && r.error.contains("not offered"), "{}", r.error);
@@ -638,4 +644,104 @@ fn issue_161_the_step_after_a_road_condition_carries_its_read_back() {
     assert!((a.friction_scale_factor - 0.85).abs() < 1e-9, "{a:?}");
     assert!(r.environment_applied.is_none());
     assert!(step(&mut s).road_condition_applied.is_none());
+}
+
+fn initial_speed(shell: &mut Shell<Fake>, handle: u32, speed: f64) -> wire::Reply {
+    call(
+        shell,
+        1,
+        wire::request::Request::SetInitialSpeed(wire::SetInitialSpeed { handle, speed }),
+    )
+}
+
+fn initial_speed_shell() -> Shell<Fake> {
+    let mut s = shell(vec![
+        wire::Capability::InitialSpeed,
+        wire::Capability::AgentVehicles,
+        wire::Capability::Autopilot,
+        wire::Capability::Commands,
+        wire::Capability::TracksTargets,
+    ]);
+    hello(&mut s, 1, false);
+    s
+}
+
+#[test]
+fn an_initial_speed_reaches_the_world_before_the_first_step() {
+    let mut s = initial_speed_shell();
+    for (i, motion) in [
+        wire::Motion::External,
+        wire::Motion::Autopilot,
+        wire::Motion::Commanded,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(spawn(&mut s, 1, &format!("e{i}"), motion).ok);
+        let r = initial_speed(&mut s, i as u32 + 1, 7.5);
+        assert!(r.ok, "{motion:?}: {}", r.error);
+    }
+    assert_eq!(s.world.initial_speeds, vec![(1, 7.5), (2, 7.5), (3, 7.5)]);
+}
+
+#[test]
+fn an_initial_speed_after_the_entitys_first_step_is_refused() {
+    let mut s = initial_speed_shell();
+    spawn(&mut s, 1, "ego", wire::Motion::External);
+    assert!(call(&mut s, 1, wire::request::Request::Step(Default::default())).ok);
+    let r = initial_speed(&mut s, 1, 7.5);
+    assert!(
+        !r.ok && r.error.contains("after its first Step"),
+        "{}",
+        r.error
+    );
+    // An entity spawned later still takes one before the next Step.
+    spawn(&mut s, 1, "late", wire::Motion::External);
+    let r = initial_speed(&mut s, 2, 3.0);
+    assert!(r.ok, "{}", r.error);
+    assert_eq!(s.world.initial_speeds, vec![(2, 3.0)]);
+}
+
+#[test]
+fn a_posed_body_takes_no_initial_speed() {
+    let mut s = initial_speed_shell();
+    spawn(&mut s, 1, "k", wire::Motion::Kinematic);
+    spawn(&mut s, 1, "t", wire::Motion::Tracked);
+    for h in [1, 2] {
+        let r = initial_speed(&mut s, h, 5.0);
+        assert!(!r.ok && r.error.contains("posed"), "{}", r.error);
+    }
+    assert!(s.world.initial_speeds.is_empty());
+}
+
+#[test]
+fn an_initial_speed_must_be_finite_non_negative_and_for_a_known_handle() {
+    let mut s = initial_speed_shell();
+    spawn(&mut s, 1, "ego", wire::Motion::External);
+    for v in [-1.0, f64::NAN, f64::INFINITY] {
+        let r = initial_speed(&mut s, 1, v);
+        assert!(
+            !r.ok && r.error.contains("finite and >= 0"),
+            "{v}: {}",
+            r.error
+        );
+    }
+    let r = initial_speed(&mut s, 9, 5.0);
+    assert!(r.error.contains("no entity with handle 9"), "{}", r.error);
+    assert!(s.world.initial_speeds.is_empty());
+}
+
+#[test]
+fn a_load_world_forgets_which_entities_have_stepped() {
+    let mut s = initial_speed_shell();
+    spawn(&mut s, 1, "ego", wire::Motion::External);
+    call(&mut s, 1, wire::request::Request::Step(Default::default()));
+    call(
+        &mut s,
+        1,
+        wire::request::Request::LoadWorld(Default::default()),
+    );
+    spawn(&mut s, 1, "ego", wire::Motion::External);
+    let r = initial_speed(&mut s, 2, 4.0);
+    assert!(r.ok, "{}", r.error);
 }

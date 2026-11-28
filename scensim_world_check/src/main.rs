@@ -1276,6 +1276,14 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
     if has(wire::Capability::Autopilot) {
         r.skip("autopilot", "needs a road; the scenario suite checks it");
     }
+    initial_speed_cases(
+        &mut c,
+        &mut r,
+        has(wire::Capability::InitialSpeed),
+        ego,
+        ego_at,
+        steps,
+    );
 
     // --- The world again, and the end ---------------------------------------------------------
     match call(&mut c, load(), LOAD_TIMEOUT) {
@@ -1298,6 +1306,150 @@ fn conformance(endpoint: &str, map: Option<String>, slope: Option<[f64; 5]>) -> 
         other => r.check("load the world again", Err(format!("{other:?}"))),
     }
     finish(c, r)
+}
+
+/// The body's speed in a step reply, and its heading off +x, deg.
+fn state_speed(s: &wire::StepReply, handle: u32) -> Option<(f64, f64)> {
+    let v = s
+        .states
+        .iter()
+        .find(|e| e.handle == handle)
+        .and_then(|e| e.twist.as_ref())
+        .and_then(|t| t.linear)?;
+    let speed = (v.x * v.x + v.y * v.y).sqrt();
+    Some((speed, v.y.atan2(v.x).to_degrees()))
+}
+
+/// `INITIAL_SPEED` (scensim issue 204): an ego spawned at v is at v at its first frame, along
+/// its heading, and coasts on from there; a late or posed initial speed is refused. Without the
+/// capability, the request is refused by name. The check's ego is replaced for it.
+fn initial_speed_cases(
+    c: &mut Client,
+    r: &mut Report,
+    offered: bool,
+    ego: Option<u32>,
+    at: wire::Pose,
+    steps: (u32, f64),
+) {
+    let set = |c: &mut Client, handle: u32, speed: f64| {
+        call(
+            c,
+            Q::SetInitialSpeed(wire::SetInitialSpeed { handle, speed }),
+            TIMEOUT,
+        )
+    };
+    if !offered {
+        r.check(
+            "an initial speed is refused without INITIAL_SPEED",
+            match ego.map(|e| set(c, e, 5.0)) {
+                Some(Err(e)) if e.contains("not offered") => Ok(String::new()),
+                None => Ok("no ego".into()),
+                other => Err(format!("answered {other:?}")),
+            },
+        );
+        r.skip("an ego spawned at speed", "no INITIAL_SPEED");
+        return;
+    }
+    if let Some(e) = ego {
+        let _ = call(c, Q::Despawn(wire::Despawn { handle: e }), TIMEOUT);
+    }
+    let frame_s = f64::from(steps.0) * steps.1;
+    let second = (1.0 / frame_s).round().max(1.0) as usize;
+    for v in [5.0, 10.0] {
+        let what = format!("an ego spawned at {v} m/s is at it on its first frame (INITIAL_SPEED)");
+        let name = format!("conformance_ego_v{v}");
+        let e = match spawn(c, &name, wire::Kind::Ego, wire::Motion::External, at) {
+            Ok(s) => s.handle,
+            Err(e) => {
+                r.check(&what, Err(e));
+                continue;
+            }
+        };
+        if let Err(err) = set(c, e, v) {
+            r.check(&what, Err(err));
+            let _ = call(c, Q::Despawn(wire::Despawn { handle: e }), TIMEOUT);
+            continue;
+        }
+        let only = |h| {
+            vec![wire::EntityPose {
+                handle: h,
+                ..Default::default()
+            }]
+        };
+        let first = frame(c, only(e), steps).map(|(_, s)| state_speed(&s, e));
+        r.check(
+            &what,
+            match first {
+                Err(err) => Err(err),
+                Ok(None) => Err("no velocity for it in the step reply".into()),
+                Ok(Some((got, yaw))) if (got - v).abs() <= 0.05 && yaw.abs() <= 2.0 => {
+                    Ok(format!("{got:.3} m/s, {yaw:.2} deg off its heading"))
+                }
+                Ok(Some((got, yaw))) => Err(format!(
+                    "{got:.3} m/s, {yaw:.2} deg off its heading: want {v} within 0.05 m/s \
+                     and 2 deg"
+                )),
+            },
+        );
+        r.check(
+            &format!("an initial speed after the first frame is refused ({v} m/s ego)"),
+            match set(c, e, v) {
+                Err(err) if err.contains("after its first Step") => Ok(String::new()),
+                other => Err(format!("answered {other:?}")),
+            },
+        );
+        let mut last = None;
+        let mut failure = None;
+        for _ in 1..second {
+            match frame(c, only(e), steps) {
+                Ok((_, s)) => last = state_speed(&s, e),
+                Err(err) => {
+                    failure = Some(err);
+                    break;
+                }
+            }
+        }
+        r.check(
+            &format!("an ego spawned at {v} m/s coasts on, not from rest, for 1 s"),
+            match (failure, last) {
+                (Some(err), _) => Err(err),
+                (None, None) => Err("no velocity for it in the step replies".into()),
+                (None, Some((got, _))) if got >= v - 0.5 && got <= v + 0.05 => {
+                    Ok(format!("{got:.3} m/s after 1 s"))
+                }
+                (None, Some((got, _))) => Err(format!(
+                    "{got:.3} m/s after 1 s with no command: want {} to {} m/s",
+                    v - 0.5,
+                    v + 0.05
+                )),
+            },
+        );
+        let _ = call(c, Q::Despawn(wire::Despawn { handle: e }), TIMEOUT);
+    }
+    let mut kinematic_at = at;
+    if let Some(p) = kinematic_at.position.as_mut() {
+        p.y += 30.0;
+    }
+    r.check(
+        "a kinematic body takes no initial speed (INITIAL_SPEED)",
+        match spawn(
+            c,
+            "conformance_kinematic_v",
+            wire::Kind::Vehicle,
+            wire::Motion::Kinematic,
+            kinematic_at,
+        ) {
+            Err(err) => Err(err),
+            Ok(s) => {
+                let got = set(c, s.handle, 5.0);
+                let _ = call(c, Q::Despawn(wire::Despawn { handle: s.handle }), TIMEOUT);
+                match got {
+                    Err(err) if err.contains("posed") => Ok(String::new()),
+                    other => Err(format!("answered {other:?}")),
+                }
+            }
+        },
+    );
 }
 
 fn finish(mut c: Client, mut r: Report) -> ExitCode {

@@ -128,6 +128,9 @@ class WorldServer:
         self.owner_seen = 0.0
         self.next_handle = 1
         self.entities = {}  # handle -> name
+        # handle -> motion, for the entities no Step has run since their spawn: only these
+        # take SetInitialSpeed (scensim issue 204)
+        self.unstepped = {}
         self.pending = {}  # handle -> Drive, from the last Apply
         self.sim_time = 0.0
         self.frame = 0
@@ -207,6 +210,7 @@ class WorldServer:
                      "y" if len(self.entities) == 1 else "ies")
             self.world.reset(list(self.entities))
         self.entities.clear()
+        self.unstepped.clear()
         self.pending.clear()
 
     def _hello(self, req, client):
@@ -255,6 +259,7 @@ class WorldServer:
         signals = [signal_dict(s) for s in req.signals] if self.offers("SIGNALS") else []
         self.world.load(req.world, list(req.ground_paths), signals, request=req)
         self.entities.clear()
+        self.unstepped.clear()
         self.pending.clear()
         # A new episode when the world changes (roadmap 051); this server's time keeps
         # running across them, which nothing may depend on.
@@ -287,6 +292,7 @@ class WorldServer:
                                 motion=motion)
         self.next_handle += 1
         self.entities[handle] = req.name
+        self.unstepped[handle] = motion
         body = body or {}
 
         def vec(v):
@@ -324,6 +330,7 @@ class WorldServer:
             self.step_summary()
         self.world.despawn(req.handle)
         del self.entities[req.handle]
+        self.unstepped.pop(req.handle, None)
         self.pending.pop(req.handle, None)
         return pb.Reply(ok=True)
 
@@ -345,6 +352,7 @@ class WorldServer:
         started = time.perf_counter()
         states, contacts = self.world.step(drives, req.substeps, req.dt, req.render,
                                            self.sim_time)
+        self.unstepped.clear()
         elapsed = time.perf_counter() - started
         self.step_ms.append(1e3 * elapsed)
         self.sim_time += req.substeps * req.dt
@@ -395,6 +403,24 @@ class WorldServer:
         return pb.Reply(ok=True, signals=pb.SignalsReply(states=[
             pb.SignalState(opendrive_id=od, colour=pb.COLOUR[colour])
             for od, colour in sorted(shown.items())]))
+
+    def _set_initial_speed(self, req):
+        if not self.offers("INITIAL_SPEED"):
+            raise RequestError("initial speeds are not offered by this server")
+        if req.handle not in self.entities:
+            raise RequestError(f"no entity with handle {req.handle}")
+        name = self.entities[req.handle]
+        motion = self.unstepped.get(req.handle)
+        if motion is None:
+            raise RequestError(f"{name!r}: an initial speed after its first Step is refused")
+        if motion in ("KINEMATIC", "TRACKED"):
+            raise RequestError(f"{name!r}: a {motion} body is posed, so its speed comes from "
+                               "its poses; no initial speed")
+        if not (math.isfinite(req.speed) and req.speed >= 0.0):
+            raise RequestError(f"{name!r}: initial speed {req.speed} m/s; it must be finite "
+                               "and >= 0")
+        self.world.set_initial_speed(req.handle, req.speed)
+        return pb.Reply(ok=True)
 
     def _set_goal(self, _req):
         raise RequestError("goals are not offered by this server (no AUTOPILOT)")

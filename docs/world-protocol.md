@@ -106,6 +106,7 @@ shells do this for you).
 | `ROAD_CONDITION_APPLIED` | reads the road state back after each `SetRoadCondition`; needs `ROAD_CONDITION` | `RoadConditionReply` |
 | `READBACK_AFTER_STEP` | reads the weather or road state back again after the first step that follows a send, the simulator's tick done (scensim issue 161); needs `ENVIRONMENT_APPLIED` or `ROAD_CONDITION_APPLIED` | `StepReply.environment_applied`, `StepReply.road_condition_applied` |
 | `COMMANDS` | moves `COMMANDED` bodies by a behaviour model's kinematic commands, which reach it with its tick gate's acknowledgements, and reads each back with the frame its command answered; needs `READS_BACK` | `Motion.COMMANDED`; `ReadBack.cmd_frame`, `EntityState.cmd_frame`, `StepReply.command_counts` |
+| `INITIAL_SPEED` | starts a body it moves (`EXTERNAL`, `AUTOPILOT`, `COMMANDED`) at the speed `SetInitialSpeed` gives, along its spawn heading, from the first step after its spawn, a vehicle's wheels spinning to match (scensim issue 204) | `SetInitialSpeed` |
 
 A `Spawn` with `motion: TRACKED` needs `TRACKED_MOTION` or `TRACKS_TARGETS`; `AUTOPILOT`
 needs `AUTOPILOT`; `EXTERNAL` for a kind other than `EGO` needs `AGENT_VEHICLES`; `COMMANDED`
@@ -243,6 +244,17 @@ Lamps not named keep theirs.
 
 SSv2's `UpdateEntityGoal` for an `AUTOPILOT` body: waypoints (the last is the goal),
 `clear`, and an optional target speed.
+
+### SetInitialSpeed (`INITIAL_SPEED`)
+
+An entity's start speed, m/s along its spawn heading, finite and >= 0 (scensim issue 204).
+OpenSCENARIO gives it by an Init `SpeedAction`, which SSv2 runs after the spawn, so it cannot
+ride in `Spawn`. Sent after the entity's `Spawn` and before the first `Step` after it; later,
+it is refused, as is one for a body the bridge poses (`KINEMATIC`, `TRACKED`: their speed
+comes from their poses). On the first step's reply the body is at that speed; with no
+command it coasts on from there. The additive request needed no protocol version: the bridge
+sends it only to a server declaring `INITIAL_SPEED`, and refuses a nonzero start speed on
+another one, naming issue 204.
 
 ### SetWeather, GetWeather -> WeatherReply (`WEATHER`)
 

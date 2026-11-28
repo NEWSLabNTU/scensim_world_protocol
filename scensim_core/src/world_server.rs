@@ -73,6 +73,14 @@ pub trait World {
     fn despawn(&mut self, handle: u32) -> WorldResult<()>;
     fn apply(&mut self, request: &wire::Apply) -> WorldResult<wire::ApplyReply>;
     fn step(&mut self, request: &wire::Step) -> WorldResult<wire::StepReply>;
+    /// `INITIAL_SPEED`: start the entity at `speed` (m/s, along its spawn heading) from the
+    /// next Step (scensim issue 204). The shell has checked the handle, that no Step has run
+    /// since its spawn, that the simulator moves it, and that the speed is finite and >= 0.
+    fn set_initial_speed(&mut self, _handle: u32, _speed: f64) -> WorldResult<()> {
+        Err(Refusal::new(
+            "initial speeds are not offered by this server",
+        ))
+    }
     fn set_step_time(&mut self, _step_time: f64) -> WorldResult<()> {
         Ok(())
     }
@@ -175,6 +183,9 @@ pub struct Shell<W: World> {
     next_handle: u32,
     /// Handle to entity name.
     entities: BTreeMap<u32, String>,
+    /// Entities no `Step` has run since their spawn, by motion: only these take
+    /// `SetInitialSpeed` (scensim issue 204).
+    unstepped: BTreeMap<u32, wire::Motion>,
     stopped: bool,
     fatal: Option<String>,
     /// When the last request other than `Hello` came: the idle check runs only when the
@@ -290,6 +301,7 @@ impl<W: World> Shell<W> {
             lease: LEASE,
             next_handle: 1,
             entities: BTreeMap::new(),
+            unstepped: BTreeMap::new(),
             stopped: false,
             fatal: None,
             last_world_request: Instant::now(),
@@ -417,6 +429,7 @@ impl<W: World> Shell<W> {
                 if handles.len() == 1 { "y" } else { "ies" }
             );
             self.entities.clear();
+            self.unstepped.clear();
             self.world.reset(&handles)?;
         }
         Ok(())
@@ -508,6 +521,7 @@ impl<W: World> Shell<W> {
             Q::SetRoadCondition(_) => "set_road_condition",
             Q::SetEnvironment(_) => "set_environment",
             Q::GetSignals(_) => "get_signals",
+            Q::SetInitialSpeed(_) => "set_initial_speed",
         };
         self.check_owner(what, client)?;
         self.last_world_request = Instant::now();
@@ -519,6 +533,7 @@ impl<W: World> Shell<W> {
                 }
                 let reply = self.world.load_world(&req)?;
                 self.entities.clear();
+                self.unstepped.clear();
                 ok(Some(R::LoadWorld(reply)))
             }
             Q::Spawn(req) => {
@@ -555,6 +570,7 @@ impl<W: World> Shell<W> {
                 let body = self.world.spawn(handle, &req)?;
                 self.next_handle += 1;
                 self.entities.insert(handle, req.name.clone());
+                self.unstepped.insert(handle, motion);
                 ok(Some(R::Spawn(wire::SpawnReply {
                     handle,
                     body: Some(body),
@@ -564,6 +580,7 @@ impl<W: World> Shell<W> {
                 self.known(req.handle)?;
                 self.world.despawn(req.handle)?;
                 self.entities.remove(&req.handle);
+                self.unstepped.remove(&req.handle);
                 ok(None)
             }
             Q::Apply(req) => {
@@ -587,8 +604,33 @@ impl<W: World> Shell<W> {
                     ));
                 }
                 let mut reply = self.world.step(&req)?;
+                self.unstepped.clear();
                 self.read_back_after_step(&mut reply)?;
                 ok(Some(R::Step(reply)))
+            }
+            Q::SetInitialSpeed(req) => {
+                self.need(wire::Capability::InitialSpeed, "initial speeds are")?;
+                self.known(req.handle)?;
+                let name = &self.entities[&req.handle];
+                let Some(motion) = self.unstepped.get(&req.handle) else {
+                    return Err(Refusal::new(format!(
+                        "{name:?}: an initial speed after its first Step is refused"
+                    )));
+                };
+                if matches!(motion, wire::Motion::Kinematic | wire::Motion::Tracked) {
+                    return Err(Refusal::new(format!(
+                        "{name:?}: a {motion:?} body is posed, so its speed comes from its \
+                         poses; no initial speed"
+                    )));
+                }
+                if !(req.speed.is_finite() && req.speed >= 0.0) {
+                    return Err(Refusal::new(format!(
+                        "{name:?}: initial speed {} m/s; it must be finite and >= 0",
+                        req.speed
+                    )));
+                }
+                self.world.set_initial_speed(req.handle, req.speed)?;
+                ok(None)
             }
             Q::SetStepTime(req) => {
                 self.world.set_step_time(req.step_time)?;
@@ -678,6 +720,7 @@ impl<W: World> Shell<W> {
                     self.owner.as_ref().map(describe).unwrap_or_default()
                 );
                 self.entities.clear();
+                self.unstepped.clear();
                 self.owner = None;
                 self.world.release(&handles)?;
                 ok(None)

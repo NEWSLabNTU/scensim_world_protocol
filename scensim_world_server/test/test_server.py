@@ -249,7 +249,8 @@ class ServerTest(unittest.TestCase):
         for request in ({"set_goal": pb.SetGoal(handle=1)},
                         {"set_weather": pb.SetWeather()}, {"get_weather": pb.GetWeather()},
                         {"set_road_condition": pb.SetRoadCondition()},
-                        {"set_environment": pb.SetEnvironment()}):
+                        {"set_environment": pb.SetEnvironment()},
+                        {"set_initial_speed": pb.SetInitialSpeed(handle=1, speed=5.0)}):
             r = call(self.server, **request)
             self.assertFalse(r.ok)
             self.assertIn("not offered", r.error)
@@ -604,6 +605,78 @@ class ServerTest(unittest.TestCase):
         hello(self.server)
         self.assertTrue(call(self.server, shutdown=pb.Shutdown()).ok)
         self.assertTrue(self.server.stopped)
+
+
+class SpeedWorld(FakeWorld):
+    capabilities = ("INITIAL_SPEED", "AGENT_VEHICLES", "AUTOPILOT", "COMMANDS", "TRACKED_MOTION")
+
+    def __init__(self):
+        super().__init__()
+        self.initial_speeds = []
+
+    def set_initial_speed(self, handle, speed):
+        self.initial_speeds.append((handle, speed))
+
+
+def initial_speed(server, handle, speed):
+    return call(server, set_initial_speed=pb.SetInitialSpeed(handle=handle, speed=speed))
+
+
+class InitialSpeedTest(unittest.TestCase):
+    """SetInitialSpeed (scensim issue 204), on the shell's side."""
+
+    def setUp(self):
+        self.world = SpeedWorld()
+        self.server = WorldServer(self.world, clock=Clock())
+        hello(self.server)
+        call(self.server, load_world=pb.LoadWorld())
+
+    def test_an_initial_speed_reaches_the_world_before_the_first_step(self):
+        for i, motion in enumerate(("EXTERNAL", "AUTOPILOT", "COMMANDED")):
+            r = spawn(self.server, f"e{i}", "VEHICLE", 10.0 * i, motion=motion)
+            self.assertTrue(r.ok, r.error)
+            r = initial_speed(self.server, r.spawn.handle, 7.5)
+            self.assertTrue(r.ok, f"{motion}: {r.error}")
+        self.assertEqual(self.world.initial_speeds, [(1, 7.5), (2, 7.5), (3, 7.5)])
+
+    def test_an_initial_speed_after_the_entitys_first_step_is_refused(self):
+        spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")
+        self.assertTrue(step(self.server).ok)
+        r = initial_speed(self.server, 1, 7.5)
+        self.assertFalse(r.ok)
+        self.assertIn("after its first Step", r.error)
+        late = spawn(self.server, "late", "VEHICLE", 20.0, motion="EXTERNAL").spawn.handle
+        r = initial_speed(self.server, late, 3.0)
+        self.assertTrue(r.ok, r.error)
+        self.assertEqual(self.world.initial_speeds, [(late, 3.0)])
+
+    def test_a_posed_body_takes_no_initial_speed(self):
+        spawn(self.server, "k", "VEHICLE", 0.0)
+        spawn(self.server, "t", "VEHICLE", 10.0, motion="TRACKED")
+        for h in (1, 2):
+            r = initial_speed(self.server, h, 5.0)
+            self.assertFalse(r.ok)
+            self.assertIn("posed", r.error)
+        self.assertEqual(self.world.initial_speeds, [])
+
+    def test_an_initial_speed_must_be_finite_non_negative_and_for_a_known_handle(self):
+        spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")
+        for v in (-1.0, float("nan"), float("inf")):
+            r = initial_speed(self.server, 1, v)
+            self.assertFalse(r.ok)
+            self.assertIn("finite and >= 0", r.error)
+        r = initial_speed(self.server, 9, 5.0)
+        self.assertFalse(r.ok)
+        self.assertIn("no entity with handle 9", r.error)
+        self.assertEqual(self.world.initial_speeds, [])
+
+    def test_a_load_world_forgets_which_entities_have_stepped(self):
+        spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")
+        step(self.server)
+        call(self.server, load_world=pb.LoadWorld())
+        h = spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL").spawn.handle
+        r = initial_speed(self.server, h, 4.0)
+        self.assertTrue(r.ok, r.error)
 
 
 class WeatherTest(unittest.TestCase):
