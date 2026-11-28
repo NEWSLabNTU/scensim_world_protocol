@@ -32,6 +32,7 @@ pub enum Call {
     Despawn(String),
     UpdateEntityStatus(StatusBatch),
     UpdateEntityGoal(String, Goal),
+    UpdateEntityInitialSpeed(String, f64),
     UpdateEnvironment(Environment),
     UpdateTrafficLights(usize),
     AttachSensor(Sensor),
@@ -142,6 +143,10 @@ impl SimBackend for FakeBackend {
 
     fn update_entity_goal(&mut self, name: &str, goal: &Goal) -> Result<(), BackendError> {
         self.record(Call::UpdateEntityGoal(name.to_string(), goal.clone()))
+    }
+
+    fn update_entity_initial_speed(&mut self, name: &str, speed: f64) -> Result<(), BackendError> {
+        self.record(Call::UpdateEntityInitialSpeed(name.to_string(), speed))
     }
 
     fn update_environment(&mut self, environment: &Environment) -> Result<(), BackendError> {

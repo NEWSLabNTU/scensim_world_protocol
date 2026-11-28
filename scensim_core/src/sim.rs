@@ -292,6 +292,15 @@ pub trait SimBackend {
     /// `UpdateEntityGoal`.
     fn update_entity_goal(&mut self, name: &str, goal: &Goal) -> Result<(), BackendError>;
 
+    /// `UpdateEntityInitialSpeed` (scensim issue 204): the entity's start speed, m/s along its
+    /// spawn heading, sent by the SSv2 fork before the entity's start. A backend that cannot
+    /// start it at that speed refuses, rather than start it at rest.
+    fn update_entity_initial_speed(&mut self, name: &str, _speed: f64) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(format!(
+            "'{name}': this backend cannot start an entity at speed (scensim issue 204)"
+        )))
+    }
+
     /// `UpdateEnvironment`.
     fn update_environment(&mut self, environment: &Environment) -> Result<(), BackendError>;
 
