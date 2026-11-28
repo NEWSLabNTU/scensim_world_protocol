@@ -345,11 +345,21 @@ fn frame(
     poses: Vec<wire::EntityPose>,
     steps: (u32, f64),
 ) -> Result<(wire::ApplyReply, wire::StepReply), String> {
+    frame_started(c, poses, steps, true)
+}
+
+/// A frame before SSv2's NPC logic has started (`started` false), or after.
+fn frame_started(
+    c: &mut Client,
+    poses: Vec<wire::EntityPose>,
+    steps: (u32, f64),
+    started: bool,
+) -> Result<(wire::ApplyReply, wire::StepReply), String> {
     let a = match call(
         c,
         Q::Apply(wire::Apply {
             poses,
-            npc_logic_started: true,
+            npc_logic_started: started,
             overwrite_ego_status: false,
         }),
         TIMEOUT * 5,
@@ -1320,8 +1330,9 @@ fn state_speed(s: &wire::StepReply, handle: u32) -> Option<(f64, f64)> {
     Some((speed, v.y.atan2(v.x).to_degrees()))
 }
 
-/// `INITIAL_SPEED` (scensim issue 204): an ego spawned at v is at v at its first frame, along
-/// its heading, and coasts on from there; a late or posed initial speed is refused. Without the
+/// `INITIAL_SPEED` (scensim issue 204): an ego given v stays at rest on a frame before SSv2's
+/// NPC logic starts, is at v along its heading on the start frame, and coasts on from there; a
+/// late or posed initial speed is refused. Without the
 /// capability, the request is refused by name. The check's ego is replaced for it.
 fn initial_speed_cases(
     c: &mut Client,
@@ -1356,7 +1367,7 @@ fn initial_speed_cases(
     let frame_s = f64::from(steps.0) * steps.1;
     let second = (1.0 / frame_s).round().max(1.0) as usize;
     for v in [5.0, 10.0] {
-        let what = format!("an ego spawned at {v} m/s is at it on its first frame (INITIAL_SPEED)");
+        let what = format!("an ego given {v} m/s is at it on the start frame (INITIAL_SPEED)");
         let name = format!("conformance_ego_v{v}");
         let e = match spawn(c, &name, wire::Kind::Ego, wire::Motion::External, at) {
             Ok(s) => s.handle,
@@ -1376,6 +1387,17 @@ fn initial_speed_cases(
                 ..Default::default()
             }]
         };
+        let before = frame_started(c, only(e), steps, false).map(|(_, s)| state_speed(&s, e));
+        r.check(
+            &format!("an ego given {v} m/s stays at rest before SSv2's NPC logic starts"),
+            match before {
+                Err(err) => Err(err),
+                Ok(Some((got, _))) if got > 0.05 => Err(format!(
+                    "{got:.3} m/s on a frame before the start: the speed is for the start"
+                )),
+                Ok(_) => Ok(String::new()),
+            },
+        );
         let first = frame(c, only(e), steps).map(|(_, s)| state_speed(&s, e));
         r.check(
             &what,
@@ -1392,9 +1414,9 @@ fn initial_speed_cases(
             },
         );
         r.check(
-            &format!("an initial speed after the first frame is refused ({v} m/s ego)"),
+            &format!("an initial speed after the start is refused ({v} m/s ego)"),
             match set(c, e, v) {
-                Err(err) if err.contains("after its first Step") => Ok(String::new()),
+                Err(err) if err.contains("after its start") => Ok(String::new()),
                 other => Err(format!("answered {other:?}")),
             },
         );
@@ -1410,7 +1432,7 @@ fn initial_speed_cases(
             }
         }
         r.check(
-            &format!("an ego spawned at {v} m/s coasts on, not from rest, for 1 s"),
+            &format!("an ego given {v} m/s coasts on from it, not from rest, for 1 s"),
             match (failure, last) {
                 (Some(err), _) => Err(err),
                 (None, None) => Err("no velocity for it in the step replies".into()),

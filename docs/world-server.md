@@ -29,9 +29,10 @@ Both shells:
   without `TRACKED_MOTION` or `TRACKS_TARGETS`, an `AUTOPILOT` spawn or `SetGoal` without
   `AUTOPILOT`, an `EXTERNAL` non-ego without `AGENT_VEHICLES`, the weather without
   `WEATHER`, and so on;
-- refuse a `SetInitialSpeed` without `INITIAL_SPEED`, for an unknown handle, after the first
-  `Step` since the entity's spawn, for a `KINEMATIC` or `TRACKED` body, or of a speed that is
-  not finite and >= 0;
+- refuse a `SetInitialSpeed` without `INITIAL_SPEED`, for an unknown handle, after the
+  entity's start (its first `Step` once SSv2's NPC logic has started), for a `KINEMATIC` or
+  `TRACKED` body, or of a speed that is not finite and >= 0; keep the one taken, and hand it to
+  the world right before the start step;
 - refuse a `Step` that carries `poses`, and a `LoadWorld` while the world is not ready;
 - turn a world's exception (Python) or `Refusal` (Rust) into a refusal whose text is the
   error, and keep serving.
@@ -67,7 +68,7 @@ is the error the bridge passes on to SSv2.
 | `spawn(handle, name, kind, subtype, center, dims, pose, model="", motion="KINEMATIC")` | yes | one body. `kind`: `"EGO"`, `"VEHICLE"`, `"PEDESTRIAN"`, `"MISC_OBJECT"`; `center` and `dims` the declared box; `motion`: `"KINEMATIC"`, `"TRACKED"`, `"EXTERNAL"`. Return None, or a dict for `SpawnReply.body` (below) |
 | `despawn(handle)` | yes | remove one body |
 | `step(drives, substeps, dt, render, sim_time)` | yes | apply `{handle: Drive}`, run `substeps` physics steps of `dt`, return `(states, contacts)` (below). `sim_time`: elapsed seconds at the step's start |
-| `set_initial_speed(handle, speed)` | `INITIAL_SPEED` | start the body at `speed` m/s along its spawn heading from the next `step` (scensim issue 204); a vehicle's wheels spin to match. The shell has checked the rest |
+| `set_initial_speed(handle, speed)` | `INITIAL_SPEED` | start the body at `speed` m/s along its spawn heading from the `step` that follows (scensim issue 204); a vehicle's wheels spin to match. The shell calls it right before the entity's start step and has checked the rest |
 | `set_signals(colours)` | `SIGNALS` | `{opendrive_id: "OFF" / "RED" / "AMBER" / "GREEN"}`, from the next step on |
 | `set_road_condition(friction_scale, wetness, properties)` | `ROAD_CONDITION` | raise `ValueError` listing every problem, and change nothing, for what cannot be applied |
 | `set_environment(weather, time_of_day, sim_time=0.0)` | `ENVIRONMENT` | the parts given (dicts; see the docstring); raise `ValueError` as above |

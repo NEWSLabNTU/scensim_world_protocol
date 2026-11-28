@@ -128,9 +128,12 @@ class WorldServer:
         self.owner_seen = 0.0
         self.next_handle = 1
         self.entities = {}  # handle -> name
-        # handle -> motion, for the entities no Step has run since their spawn: only these
-        # take SetInitialSpeed (scensim issue 204)
-        self.unstepped = {}
+        # handle -> motion, for the entities that have not started: only these take
+        # SetInitialSpeed (scensim issue 204). An entity starts at the first Step after its
+        # spawn once SSv2's NPC logic has started (Apply.npc_logic_started).
+        self.unstarted = {}
+        self.initial_speeds = {}  # handle -> m/s, handed to the world before the start step
+        self.npc_logic_started = False  # the last Apply's
         self.pending = {}  # handle -> Drive, from the last Apply
         self.sim_time = 0.0
         self.frame = 0
@@ -210,7 +213,7 @@ class WorldServer:
                      "y" if len(self.entities) == 1 else "ies")
             self.world.reset(list(self.entities))
         self.entities.clear()
-        self.unstepped.clear()
+        self._forget_starts()
         self.pending.clear()
 
     def _hello(self, req, client):
@@ -259,7 +262,7 @@ class WorldServer:
         signals = [signal_dict(s) for s in req.signals] if self.offers("SIGNALS") else []
         self.world.load(req.world, list(req.ground_paths), signals, request=req)
         self.entities.clear()
-        self.unstepped.clear()
+        self._forget_starts()
         self.pending.clear()
         # A new episode when the world changes (roadmap 051); this server's time keeps
         # running across them, which nothing may depend on.
@@ -292,7 +295,7 @@ class WorldServer:
                                 motion=motion)
         self.next_handle += 1
         self.entities[handle] = req.name
-        self.unstepped[handle] = motion
+        self.unstarted[handle] = motion
         body = body or {}
 
         def vec(v):
@@ -330,7 +333,8 @@ class WorldServer:
             self.step_summary()
         self.world.despawn(req.handle)
         del self.entities[req.handle]
-        self.unstepped.pop(req.handle, None)
+        self.unstarted.pop(req.handle, None)
+        self.initial_speeds.pop(req.handle, None)
         self.pending.pop(req.handle, None)
         return pb.Reply(ok=True)
 
@@ -341,6 +345,7 @@ class WorldServer:
         for p in req.poses:
             if p.HasField("pose") or p.HasField("twist") or p.kinematic:
                 self.pending[p.handle] = drive_of(p)
+        self.npc_logic_started = req.npc_logic_started
         return pb.Reply(ok=True, apply=pb.ApplyReply())
 
     def _step(self, req):
@@ -350,9 +355,14 @@ class WorldServer:
             raise RequestError("Step carries no poses since protocol 4: send them by Apply")
         drives, self.pending = self.pending, {}
         started = time.perf_counter()
+        if self.npc_logic_started:
+            speeds, self.initial_speeds = self.initial_speeds, {}
+            for handle, speed in sorted(speeds.items()):
+                self.world.set_initial_speed(handle, speed)
         states, contacts = self.world.step(drives, req.substeps, req.dt, req.render,
                                            self.sim_time)
-        self.unstepped.clear()
+        if self.npc_logic_started:
+            self.unstarted.clear()
         elapsed = time.perf_counter() - started
         self.step_ms.append(1e3 * elapsed)
         self.sim_time += req.substeps * req.dt
@@ -410,17 +420,25 @@ class WorldServer:
         if req.handle not in self.entities:
             raise RequestError(f"no entity with handle {req.handle}")
         name = self.entities[req.handle]
-        motion = self.unstepped.get(req.handle)
+        motion = self.unstarted.get(req.handle)
         if motion is None:
-            raise RequestError(f"{name!r}: an initial speed after its first Step is refused")
+            raise RequestError(f"{name!r}: an initial speed after its start (its first Step once "
+                               "SSv2's NPC logic has started) is refused")
         if motion in ("KINEMATIC", "TRACKED"):
             raise RequestError(f"{name!r}: a {motion} body is posed, so its speed comes from "
                                "its poses; no initial speed")
         if not (math.isfinite(req.speed) and req.speed >= 0.0):
             raise RequestError(f"{name!r}: initial speed {req.speed} m/s; it must be finite "
                                "and >= 0")
-        self.world.set_initial_speed(req.handle, req.speed)
+        self.initial_speeds[req.handle] = req.speed
         return pb.Reply(ok=True)
+
+    def _forget_starts(self):
+        """Every entity is gone: no start, no initial speed is pending, and SSv2's NPC logic
+        starts again with its next scenario."""
+        self.unstarted.clear()
+        self.initial_speeds.clear()
+        self.npc_logic_started = False
 
     def _set_goal(self, _req):
         raise RequestError("goals are not offered by this server (no AUTOPILOT)")

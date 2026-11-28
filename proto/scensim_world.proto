@@ -138,8 +138,8 @@ enum Capability {
   // on that step without fail; an empty one is a protocol error.
   CAPABILITY_READBACK_AFTER_STEP = 15;
   // `SetInitialSpeed` (scensim issue 204): a body the simulator moves starts at the speed it
-  // is given, along its spawn heading, from the first Step after its spawn (a vehicle's wheels
-  // spinning to match), instead of at rest.
+  // is given, along its spawn heading, from its start (a vehicle's wheels spinning to match),
+  // instead of at rest.
   CAPABILITY_INITIAL_SPEED = 16;
 }
 
@@ -372,9 +372,12 @@ message Despawn {
 
 // Start a spawned entity at a speed (scensim issue 204). OpenSCENARIO gives an entity its start
 // speed by an Init SpeedAction, which SSv2 runs after the spawn, so the speed cannot ride in
-// `Spawn`. Sent after the entity's `Spawn` and before the first `Step` after it; later, refused.
-// For a body the simulator moves (`EXTERNAL`, `AUTOPILOT`, `COMMANDED`); a posed body's speed
-// comes from its poses (`KINEMATIC`, `TRACKED`), so it is refused. Needs `INITIAL_SPEED`.
+// `Spawn`. It applies at the entity's start: the first `Step` after its spawn once SSv2's NPC
+// logic has started (`Apply.npc_logic_started`); through the steps before (SSv2 steps the world
+// before its Init actions and while it waits for an engagement) the body is at rest. Sent after
+// the start, refused; sent again before it, the last holds. For a body the simulator moves
+// (`EXTERNAL`, `AUTOPILOT`, `COMMANDED`); a posed body's speed comes from its poses (`KINEMATIC`,
+// `TRACKED`), so it is refused. Needs `INITIAL_SPEED`.
 message SetInitialSpeed {
   uint32 handle = 1;
   // m/s along the spawn heading, finite and >= 0.

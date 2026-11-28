@@ -134,9 +134,10 @@ class World:
 
     def set_initial_speed(self, handle, speed):
         """``INITIAL_SPEED`` (scensim issue 204): start the entity at `speed` (m/s, along its
-        spawn heading) from the next step. The shell has checked the handle, that no step has
-        run since its spawn, that the simulator moves it, and that the speed is finite and
-        >= 0."""
+        spawn heading) from the step that follows. The shell calls it right before the entity's
+        start step, the first once SSv2's NPC logic has started, having checked the handle, that
+        the simulator moves it, and that the speed is finite and >= 0; through the steps
+        before, the body is at rest."""
         raise NotImplementedError("this simulator does not start entities at speed")
 
     def reset(self, handles):

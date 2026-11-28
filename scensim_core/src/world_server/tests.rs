@@ -16,7 +16,8 @@ struct Fake {
     lag: bool,
     fog_at_tick: Option<f64>,
     steps: u32,
-    initial_speeds: Vec<(u32, f64)>,
+    /// (handle, speed, the steps run before it reached the world)
+    initial_speeds: Vec<(u32, f64, u32)>,
 }
 
 impl World for Fake {
@@ -101,7 +102,7 @@ impl World for Fake {
         })
     }
     fn set_initial_speed(&mut self, handle: u32, speed: f64) -> WorldResult<()> {
-        self.initial_speeds.push((handle, speed));
+        self.initial_speeds.push((handle, speed, self.steps));
         Ok(())
     }
     fn applied_environment(&mut self) -> WorldResult<wire::ScenarioWeather> {
@@ -666,8 +667,22 @@ fn initial_speed_shell() -> Shell<Fake> {
     s
 }
 
+/// One SSv2 frame: an Apply (SSv2's NPC logic started or not), then a Step.
+fn ssv2_frame(shell: &mut Shell<Fake>, started: bool) -> wire::Reply {
+    let r = call(
+        shell,
+        1,
+        wire::request::Request::Apply(wire::Apply {
+            npc_logic_started: started,
+            ..Default::default()
+        }),
+    );
+    assert!(r.ok, "{}", r.error);
+    call(shell, 1, wire::request::Request::Step(Default::default()))
+}
+
 #[test]
-fn an_initial_speed_reaches_the_world_before_the_first_step() {
+fn an_initial_speed_reaches_the_world_right_before_the_start_step() {
     let mut s = initial_speed_shell();
     for (i, motion) in [
         wire::Motion::External,
@@ -681,25 +696,51 @@ fn an_initial_speed_reaches_the_world_before_the_first_step() {
         let r = initial_speed(&mut s, i as u32 + 1, 7.5);
         assert!(r.ok, "{motion:?}: {}", r.error);
     }
-    assert_eq!(s.world.initial_speeds, vec![(1, 7.5), (2, 7.5), (3, 7.5)]);
+    // SSv2 steps the world before its NPC logic starts (the interpreter's first update, the
+    // wait for an engagement): the bodies stay at rest through those steps.
+    assert!(ssv2_frame(&mut s, false).ok);
+    assert!(ssv2_frame(&mut s, false).ok);
+    assert!(s.world.initial_speeds.is_empty());
+    // The speed may still be given, or given again, before the start.
+    assert!(initial_speed(&mut s, 1, 8.0).ok);
+    assert!(ssv2_frame(&mut s, true).ok);
+    assert_eq!(
+        s.world.initial_speeds,
+        vec![(1, 8.0, 2), (2, 7.5, 2), (3, 7.5, 2)]
+    );
+    assert!(ssv2_frame(&mut s, true).ok);
+    assert_eq!(s.world.initial_speeds.len(), 3, "handed over once");
 }
 
 #[test]
-fn an_initial_speed_after_the_entitys_first_step_is_refused() {
+fn an_initial_speed_after_the_entitys_start_is_refused() {
     let mut s = initial_speed_shell();
     spawn(&mut s, 1, "ego", wire::Motion::External);
-    assert!(call(&mut s, 1, wire::request::Request::Step(Default::default())).ok);
+    assert!(ssv2_frame(&mut s, true).ok);
     let r = initial_speed(&mut s, 1, 7.5);
-    assert!(
-        !r.ok && r.error.contains("after its first Step"),
-        "{}",
-        r.error
-    );
-    // An entity spawned later still takes one before the next Step.
+    assert!(r.error.contains("after its start"), "{}", r.error);
+    // An entity spawned after the start starts on the next step.
     spawn(&mut s, 1, "late", wire::Motion::External);
-    let r = initial_speed(&mut s, 2, 3.0);
-    assert!(r.ok, "{}", r.error);
-    assert_eq!(s.world.initial_speeds, vec![(2, 3.0)]);
+    assert!(initial_speed(&mut s, 2, 3.0).ok);
+    assert!(ssv2_frame(&mut s, true).ok);
+    assert_eq!(s.world.initial_speeds, vec![(2, 3.0, 1)]);
+    assert!(initial_speed(&mut s, 2, 3.0)
+        .error
+        .contains("after its start"));
+}
+
+#[test]
+fn a_despawned_entitys_initial_speed_never_reaches_the_world() {
+    let mut s = initial_speed_shell();
+    spawn(&mut s, 1, "ego", wire::Motion::External);
+    assert!(initial_speed(&mut s, 1, 7.5).ok);
+    call(
+        &mut s,
+        1,
+        wire::request::Request::Despawn(wire::Despawn { handle: 1 }),
+    );
+    assert!(ssv2_frame(&mut s, true).ok);
+    assert!(s.world.initial_speeds.is_empty());
 }
 
 #[test]
@@ -732,7 +773,7 @@ fn an_initial_speed_must_be_finite_non_negative_and_for_a_known_handle() {
 }
 
 #[test]
-fn a_load_world_forgets_which_entities_have_stepped() {
+fn a_load_world_forgets_which_entities_have_started() {
     let mut s = initial_speed_shell();
     spawn(&mut s, 1, "ego", wire::Motion::External);
     call(&mut s, 1, wire::request::Request::Step(Default::default()));

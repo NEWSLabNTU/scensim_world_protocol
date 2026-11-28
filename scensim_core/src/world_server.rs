@@ -74,8 +74,10 @@ pub trait World {
     fn apply(&mut self, request: &wire::Apply) -> WorldResult<wire::ApplyReply>;
     fn step(&mut self, request: &wire::Step) -> WorldResult<wire::StepReply>;
     /// `INITIAL_SPEED`: start the entity at `speed` (m/s, along its spawn heading) from the
-    /// next Step (scensim issue 204). The shell has checked the handle, that no Step has run
-    /// since its spawn, that the simulator moves it, and that the speed is finite and >= 0.
+    /// step that follows (scensim issue 204). The shell calls it right before the entity's start
+    /// step, the first once SSv2's NPC logic has started, having checked the handle, that the
+    /// simulator moves it, and that the speed is finite and >= 0; through the steps before, the
+    /// body is at rest.
     fn set_initial_speed(&mut self, _handle: u32, _speed: f64) -> WorldResult<()> {
         Err(Refusal::new(
             "initial speeds are not offered by this server",
@@ -183,9 +185,14 @@ pub struct Shell<W: World> {
     next_handle: u32,
     /// Handle to entity name.
     entities: BTreeMap<u32, String>,
-    /// Entities no `Step` has run since their spawn, by motion: only these take
-    /// `SetInitialSpeed` (scensim issue 204).
-    unstepped: BTreeMap<u32, wire::Motion>,
+    /// Entities that have not started, by motion: only these take `SetInitialSpeed` (scensim
+    /// issue 204). An entity starts at the first `Step` after its spawn once SSv2's NPC logic
+    /// has started (`Apply.npc_logic_started`).
+    unstarted: BTreeMap<u32, wire::Motion>,
+    /// The initial speeds given, handed to the world right before the start step.
+    initial_speeds: BTreeMap<u32, f64>,
+    /// The last `Apply`'s `npc_logic_started`.
+    npc_logic_started: bool,
     stopped: bool,
     fatal: Option<String>,
     /// When the last request other than `Hello` came: the idle check runs only when the
@@ -301,7 +308,9 @@ impl<W: World> Shell<W> {
             lease: LEASE,
             next_handle: 1,
             entities: BTreeMap::new(),
-            unstepped: BTreeMap::new(),
+            unstarted: BTreeMap::new(),
+            initial_speeds: BTreeMap::new(),
+            npc_logic_started: false,
             stopped: false,
             fatal: None,
             last_world_request: Instant::now(),
@@ -429,7 +438,7 @@ impl<W: World> Shell<W> {
                 if handles.len() == 1 { "y" } else { "ies" }
             );
             self.entities.clear();
-            self.unstepped.clear();
+            self.forget_starts();
             self.world.reset(&handles)?;
         }
         Ok(())
@@ -476,6 +485,14 @@ impl<W: World> Shell<W> {
             // it (scensim issue 135)
             boot_id: boot_id(),
         }))))
+    }
+
+    /// Every entity is gone: no start, no initial speed is pending, and SSv2's NPC logic
+    /// starts again with its next scenario.
+    fn forget_starts(&mut self) {
+        self.unstarted.clear();
+        self.initial_speeds.clear();
+        self.npc_logic_started = false;
     }
 
     fn need(&self, c: wire::Capability, what: &str) -> WorldResult<()> {
@@ -533,7 +550,7 @@ impl<W: World> Shell<W> {
                 }
                 let reply = self.world.load_world(&req)?;
                 self.entities.clear();
-                self.unstepped.clear();
+                self.forget_starts();
                 ok(Some(R::LoadWorld(reply)))
             }
             Q::Spawn(req) => {
@@ -570,7 +587,7 @@ impl<W: World> Shell<W> {
                 let body = self.world.spawn(handle, &req)?;
                 self.next_handle += 1;
                 self.entities.insert(handle, req.name.clone());
-                self.unstepped.insert(handle, motion);
+                self.unstarted.insert(handle, motion);
                 ok(Some(R::Spawn(wire::SpawnReply {
                     handle,
                     body: Some(body),
@@ -580,7 +597,8 @@ impl<W: World> Shell<W> {
                 self.known(req.handle)?;
                 self.world.despawn(req.handle)?;
                 self.entities.remove(&req.handle);
-                self.unstepped.remove(&req.handle);
+                self.unstarted.remove(&req.handle);
+                self.initial_speeds.remove(&req.handle);
                 ok(None)
             }
             Q::Apply(req) => {
@@ -595,6 +613,7 @@ impl<W: World> Shell<W> {
                         "poses for unknown handle(s) {unknown:?}"
                     )));
                 }
+                self.npc_logic_started = req.npc_logic_started;
                 ok(Some(R::Apply(self.world.apply(&req)?)))
             }
             Q::Step(req) => {
@@ -603,8 +622,15 @@ impl<W: World> Shell<W> {
                         "Step carries no poses since protocol 4: send them by Apply",
                     ));
                 }
+                if self.npc_logic_started {
+                    for (handle, speed) in std::mem::take(&mut self.initial_speeds) {
+                        self.world.set_initial_speed(handle, speed)?;
+                    }
+                }
                 let mut reply = self.world.step(&req)?;
-                self.unstepped.clear();
+                if self.npc_logic_started {
+                    self.unstarted.clear();
+                }
                 self.read_back_after_step(&mut reply)?;
                 ok(Some(R::Step(reply)))
             }
@@ -612,9 +638,10 @@ impl<W: World> Shell<W> {
                 self.need(wire::Capability::InitialSpeed, "initial speeds are")?;
                 self.known(req.handle)?;
                 let name = &self.entities[&req.handle];
-                let Some(motion) = self.unstepped.get(&req.handle) else {
+                let Some(motion) = self.unstarted.get(&req.handle) else {
                     return Err(Refusal::new(format!(
-                        "{name:?}: an initial speed after its first Step is refused"
+                        "{name:?}: an initial speed after its start (its first Step once SSv2's \
+                         NPC logic has started) is refused"
                     )));
                 };
                 if matches!(motion, wire::Motion::Kinematic | wire::Motion::Tracked) {
@@ -629,7 +656,7 @@ impl<W: World> Shell<W> {
                         req.speed
                     )));
                 }
-                self.world.set_initial_speed(req.handle, req.speed)?;
+                self.initial_speeds.insert(req.handle, req.speed);
                 ok(None)
             }
             Q::SetStepTime(req) => {
@@ -720,7 +747,7 @@ impl<W: World> Shell<W> {
                     self.owner.as_ref().map(describe).unwrap_or_default()
                 );
                 self.entities.clear();
-                self.unstepped.clear();
+                self.forget_starts();
                 self.owner = None;
                 self.world.release(&handles)?;
                 ok(None)

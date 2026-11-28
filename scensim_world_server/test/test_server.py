@@ -615,7 +615,7 @@ class SpeedWorld(FakeWorld):
         self.initial_speeds = []
 
     def set_initial_speed(self, handle, speed):
-        self.initial_speeds.append((handle, speed))
+        self.initial_speeds.append((handle, speed, len(self.steps)))
 
 
 def initial_speed(server, handle, speed):
@@ -631,24 +631,46 @@ class InitialSpeedTest(unittest.TestCase):
         hello(self.server)
         call(self.server, load_world=pb.LoadWorld())
 
-    def test_an_initial_speed_reaches_the_world_before_the_first_step(self):
+    def frame(self, started):
+        """One SSv2 frame: an Apply (its NPC logic started or not), then a Step."""
+        r = call(self.server, apply=pb.Apply(npc_logic_started=started))
+        self.assertTrue(r.ok, r.error)
+        return call(self.server, step=pb.Step(substeps=1, dt=0.05))
+
+    def test_an_initial_speed_reaches_the_world_right_before_the_start_step(self):
         for i, motion in enumerate(("EXTERNAL", "AUTOPILOT", "COMMANDED")):
             r = spawn(self.server, f"e{i}", "VEHICLE", 10.0 * i, motion=motion)
             self.assertTrue(r.ok, r.error)
             r = initial_speed(self.server, r.spawn.handle, 7.5)
             self.assertTrue(r.ok, f"{motion}: {r.error}")
-        self.assertEqual(self.world.initial_speeds, [(1, 7.5), (2, 7.5), (3, 7.5)])
+        # SSv2 steps the world before its NPC logic starts: the bodies stay at rest
+        self.assertTrue(self.frame(False).ok)
+        self.assertTrue(self.frame(False).ok)
+        self.assertEqual(self.world.initial_speeds, [])
+        self.assertTrue(initial_speed(self.server, 1, 8.0).ok)
+        self.assertTrue(self.frame(True).ok)
+        self.assertEqual(self.world.initial_speeds, [(1, 8.0, 2), (2, 7.5, 2), (3, 7.5, 2)])
+        self.assertTrue(self.frame(True).ok)
+        self.assertEqual(len(self.world.initial_speeds), 3, "handed over once")
 
-    def test_an_initial_speed_after_the_entitys_first_step_is_refused(self):
+    def test_an_initial_speed_after_the_entitys_start_is_refused(self):
         spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")
-        self.assertTrue(step(self.server).ok)
+        self.assertTrue(self.frame(True).ok)
         r = initial_speed(self.server, 1, 7.5)
         self.assertFalse(r.ok)
-        self.assertIn("after its first Step", r.error)
+        self.assertIn("after its start", r.error)
         late = spawn(self.server, "late", "VEHICLE", 20.0, motion="EXTERNAL").spawn.handle
-        r = initial_speed(self.server, late, 3.0)
-        self.assertTrue(r.ok, r.error)
-        self.assertEqual(self.world.initial_speeds, [(late, 3.0)])
+        self.assertTrue(initial_speed(self.server, late, 3.0).ok)
+        self.assertTrue(self.frame(True).ok)
+        self.assertEqual(self.world.initial_speeds, [(late, 3.0, 1)])
+        self.assertIn("after its start", initial_speed(self.server, late, 3.0).error)
+
+    def test_a_despawned_entitys_initial_speed_never_reaches_the_world(self):
+        spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")
+        self.assertTrue(initial_speed(self.server, 1, 7.5).ok)
+        call(self.server, despawn=pb.Despawn(handle=1))
+        self.assertTrue(self.frame(True).ok)
+        self.assertEqual(self.world.initial_speeds, [])
 
     def test_a_posed_body_takes_no_initial_speed(self):
         spawn(self.server, "k", "VEHICLE", 0.0)
@@ -670,9 +692,10 @@ class InitialSpeedTest(unittest.TestCase):
         self.assertIn("no entity with handle 9", r.error)
         self.assertEqual(self.world.initial_speeds, [])
 
-    def test_a_load_world_forgets_which_entities_have_stepped(self):
+    def test_a_load_world_forgets_which_entities_have_started(self):
         spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL")
-        step(self.server)
+        self.assertTrue(initial_speed(self.server, 1, 9.0).ok)
+        self.frame(True)
         call(self.server, load_world=pb.LoadWorld())
         h = spawn(self.server, "ego", "EGO", 0.0, motion="EXTERNAL").spawn.handle
         r = initial_speed(self.server, h, 4.0)
