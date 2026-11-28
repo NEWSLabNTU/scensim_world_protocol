@@ -313,7 +313,7 @@ The checks, in order. Each prints `PASS`, `FAIL` or `skip`; the last line is
 | a pose's orientation reads back as posed | the NPC posed at (30, 0, 1.5) with roll +5, pitch -10 (nose up), yaw 30 deg (ROS REP-103) reads back within 1 deg in the next step's `states`. It catches a server whose two directions disagree; one that mirrors both alike passes it |
 | the ego settles with the road's pitch sign | with `--slope X,Y,Z,YAW,PITCH`: the ego was spawned level at (X, Y, Z) with heading YAW (world frame, m, deg) on a known slope of the `--map`, whose pitch along that heading is PITCH (deg, ROS's sense: facing uphill is negative). After 60 steps (3 s) of the simulator's own gravity, its read-back pitch has PITCH's sign and is within 3 deg of it. This is the absolute check: only the world's geometry decides it. Skipped without `--slope`. CARLA, NTU ramp (072 leg 40): `--map <NTU> --slope 52969.53,67864.92,9.6,-91.1,-10.5` (map coordinates: the check's map origin is 0) |
 | an initial speed is refused without INITIAL_SPEED | without `INITIAL_SPEED`: `SetInitialSpeed` for the ego is refused, naming the capability |
-| an ego given a start speed (four checks per speed) | with `INITIAL_SPEED`, for 5 and 10 m/s, on a fresh ego where the check's ego was (on `--slope`'s slope when given): one frame after the spawn, then `SetInitialSpeed`, then 5 frames before SSv2's NPC logic starts, on which it is at rest (0.05 m/s at most) and its pose holds within 1 cm; on the start frame it is at the speed within 0.05 m/s and 2 deg of its heading; a second `SetInitialSpeed` is refused after the start; after 1 s with no command it is between v - g sin(grade) - 0.1 and v - g sin(grade) + 0.05 m/s (below) |
+| an ego given a start speed (four checks per speed) | with `INITIAL_SPEED`, for 5 and 10 m/s, on a fresh ego where the check's ego was (on `--slope`'s slope when given): one frame after the spawn (SSv2's first update), then `SetInitialSpeed`, then 20 frames (1 s) before SSv2's NPC logic starts, over the last 5 of which (the body settled from its spawn) it is at rest (0.05 m/s at most) and its pose holds within 1 cm; on the start frame it is at the speed, less the grade's share over that frame, within 0.05 m/s and 2 deg of its heading; a second `SetInitialSpeed` is refused after the start; after 1 s with no command it is between v - G - 0.1 and v - G + 0.05 m/s, G the grade's share summed frame by frame from the body's own pitch (below) |
 | a kinematic body takes no initial speed | with `INITIAL_SPEED`: `SetInitialSpeed` for a `KINEMATIC` vehicle is refused, naming its motion |
 | despawning an unknown handle is refused | `Despawn` of handle 999999 is refused |
 | a tracked body follows at 5 m/s | with `TRACKS_TARGETS` or `TRACKED_MOTION`: a `TRACKED` vehicle at (60, 0, 0.5) is driven for 20 frames at 5 m/s (by pose and `ssv2_twist`, or by `twist`) and moves more than 2.5 m; under `TRACKS_TARGETS` the 20th `ApplyReply` has a `TrackingSample` for it. Skipped otherwise |
@@ -331,9 +331,12 @@ A core-only server runs 20 checks (21 with `--slope`). Not checked here: `AGENT_
 the catalog at a real ego's spawn).
 
 The coast after a start speed: a car with no command loses speed to rolling resistance and
-drag, and to the grade (g sin of the road's pitch, from `--slope`). The 0.1 m/s allowed in 1 s
+drag, and to the grade (g sin of the body's own pitch, frame by frame: a car on its suspension
+stands steeper than the road, 4.7 deg on Town03's 3.3 deg spawn, and a hill need not be one
+slope). The 0.1 m/s allowed in 1 s
 beyond the grade is twice what CARLA 0.9.16 measured: 0.05 m/s at 10 m/s on the flat (Tesla
-Model 3, 0.003125 s physics substeps), after the start frame. An Isaac measurement goes here
+Model 3, 0.003125 s physics substeps), after the start frame. On Town03's hill (`--slope 151.36,182.78,0.60,-91.0,-3.29`, Town03's
+map directory) every start-speed check passes. An Isaac measurement goes here
 with its server's support (scensim issue 204).
 
 Request timeouts: `Hello` 2 s, `Spawn` 120 s (the bridge's `load_timeout_seconds` default), `Apply` 10 s, `Step` 60 s, `LoadWorld` and
