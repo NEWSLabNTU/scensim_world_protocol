@@ -399,6 +399,26 @@ message UpdateEntityGoalResponse {
 }
 
 /**
+ * The start speed of an entity the simulator moves (behavior "Autoware", "agent",
+ * "simulator_autopilot" or "model"): its Init SpeedAction's absolute speed [m/s], along its
+ * spawn heading. traffic_simulator runs the Init actions after the spawn, so the speed cannot
+ * ride in SpawnVehicleEntityRequest.initial_speed; it sends this once per such entity with a
+ * nonzero start speed, before the first UpdateFrame after its spawn (scensim issue 204). A
+ * simulator that cannot start the entity at that speed must refuse it, not start it at rest.
+ **/
+message UpdateEntityInitialSpeedRequest {
+  string name = 1;   // Entity name.
+  double speed = 2;  // Start speed [m/s], finite and >= 0.
+}
+
+/**
+ * Response of setting an entity's start speed.
+ **/
+message UpdateEntityInitialSpeedResponse {
+  Result result = 1; // Result of [UpdateEntityInitialSpeedRequest](#UpdateEntityInitialSpeedRequest)
+}
+
+/**
  * A road condition (OpenSCENARIO RoadCondition): the whole road state from now on, replacing
  * the last one sent.
  *  - friction_scale_factor: scales every surface's friction, world-wide.
@@ -498,6 +518,7 @@ message SimulationRequest {
     AttachImuSensorRequest attach_imu_sensor = 15;
     UpdateEntityGoalRequest update_entity_goal = 16;
     UpdateEnvironmentRequest update_environment = 17;
+    UpdateEntityInitialSpeedRequest update_entity_initial_speed = 18;
   }
 }
 
@@ -523,5 +544,6 @@ message SimulationResponse {
     AttachImuSensorResponse attach_imu_sensor = 15;
     UpdateEntityGoalResponse update_entity_goal = 16;
     UpdateEnvironmentResponse update_environment = 17;
+    UpdateEntityInitialSpeedResponse update_entity_initial_speed = 18;
   }
 }
